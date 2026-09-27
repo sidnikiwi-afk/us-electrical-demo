@@ -1,0 +1,10 @@
+{
+  "name": "Room drawing to labour — prototype",
+  "short_name": "Drawing proto",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#eef1f6",
+  "theme_color": "#23324d",
+  "icons": []
+}

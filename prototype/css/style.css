@@ -1,0 +1,125 @@
+/* Prototype styling: large controls, plain British English labels. */
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; font: 16px/1.4 system-ui, sans-serif; color: #1a1a1a; }
+button { font: inherit; min-height: 48px; min-width: 48px; border-radius: 8px; border: 1px solid #999; background: #fff; cursor: pointer; }
+button:disabled { opacity: .4; cursor: default; }
+.spacer { flex: 2; }
+[hidden] { display: none !important; }
+
+#app { display: flex; flex-direction: column; height: 100vh; }
+#topbar { display: flex; align-items: center; gap: 8px; min-height: 56px; padding: 4px 10px; background: #23324d; color: #fff; flex-wrap: wrap; }
+#topbar button { background: #33507e; color: #fff; border-color: #5a77a6; }
+#topbar button { flex-shrink: 0; }
+.proto-label { background: #c0392b; color: #fff; padding: 3px 8px; border-radius: 4px; font-weight: 700; font-size: 13px; flex-shrink: 0; }
+.rates-label { font-size: 13px; color: #d9e2f2; flex-shrink: 0; }
+.job-name { flex: 1 1 180px; min-width: 70px; max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip { padding: 4px 10px; border-radius: 12px; font-size: 13px; background: #4c6a99; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; }
+.chip.ok { background: #2e7d32; }
+.chip.warn { background: #8a5a00; }
+.chip.err { background: #b00020; }
+.sample-chip { background: #6a4fa3; flex-shrink: 0; }
+
+#main { flex: 1; display: flex; min-height: 0; position: relative; }
+#mode-rail { display: flex; flex-direction: column; gap: 6px; padding: 8px 6px; background: #e8ecf3; width: 88px; overflow-y: auto; }
+.mode-btn { height: 64px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; font-size: 14px; }
+.mode-btn span { font-size: 12px; }
+.mode-btn.active { background: #23324d; color: #fff; border-color: #23324d; }
+.rail-extra { margin-top: auto; }
+
+#place-palette { position: absolute; left: 96px; top: 64px; z-index: 5; background: #fff; border: 1px solid #999; border-radius: 8px; padding: 8px; display: flex; flex-wrap: wrap; gap: 6px; width: 330px; box-shadow: 0 2px 10px rgba(0,0,0,.25); }
+.palette-title { margin: 0 0 4px; font-weight: 700; width: 100%; }
+.pal-btn { width: 100px; flex: 0 0 auto; display: flex; flex-direction: column; gap: 3px; align-items: center; padding: 6px; font-size: 13px; min-height: 64px; }
+.pal-btn .sym { font-size: 18px; font-weight: 700; }
+.pal-btn.active { background: #dce7ff; border-color: #23324d; }
+
+#centre { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#view-tabs { display: flex; gap: 4px; padding: 6px 8px 0; flex-wrap: wrap; }
+#view-tabs button { min-height: 44px; padding: 4px 12px; }
+#view-tabs button.active { background: #23324d; color: #fff; }
+#canvas-wrap { flex: 1; position: relative; min-height: 0; background: #fbfaf7; }
+#canvas { width: 100%; height: 100%; display: block; touch-action: none; user-select: none; }
+#hint { position: absolute; left: 12px; bottom: 10px; background: rgba(255,255,255,.9); border: 1px solid #bbb; border-radius: 6px; padding: 4px 10px; font-size: 14px; pointer-events: none; max-width: 70%; }
+#zoom-controls { position: absolute; right: 12px; top: 8px; display: flex; gap: 6px; }
+#zoom-controls button { min-width: 44px; }
+
+#inspector { width: 320px; border-left: 1px solid #ccc; background: #fff; padding: 12px; overflow-y: auto; }
+#inspector h2 { margin: 0 0 8px; font-size: 17px; }
+.inspector-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.inspector-head h2 { flex: 1; margin: 0; }
+.inspector-toggle { min-height: 40px; padding: 2px 10px; font-size: 14px; }
+.job-title { font-weight: 700; margin: 4px 0; word-break: break-word; }
+.legend { margin: 4px 0; padding-left: 18px; font-size: 13px; }
+.legend li { margin: 2px 0; }
+.q-chip { display: inline-block; background: #eef2f8; border-radius: 10px; padding: 1px 8px; margin: 1px 2px; }
+#quote-bar .q-chip { background: rgba(255,255,255,.18); }
+.count-line { line-height: 1.7; }
+#inspector label { display: block; margin: 10px 0 2px; font-weight: 600; font-size: 14px; }
+#inspector input, #inspector select, #inspector textarea { width: 100%; font: inherit; padding: 8px; border: 1px solid #888; border-radius: 6px; min-height: 44px; }
+#inspector textarea { min-height: 90px; }
+.field-row { display: flex; align-items: center; gap: 4px; }
+.field-row button { min-width: 44px; }
+.field-err { color: #b00020; font-size: 13px; margin-top: 2px; }
+.price-line { margin: 10px 0; padding: 8px; background: #f2f4f8; border-radius: 6px; font-size: 15px; }
+.btn-danger { border-color: #b00020; color: #b00020; width: 100%; margin-top: 12px; }
+.btn-primary { background: #23324d; color: #fff; border-color: #23324d; }
+
+#quote-bar { display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 4px 12px; background: #23324d; color: #fff; flex-wrap: wrap; }
+#quote-bar.incomplete { background: #9a6b00; }
+#quote-bar button { background: #33507e; color: #fff; border-color: #5a77a6; }
+
+#start { position: fixed; inset: 0; background: #eef1f6; display: flex; align-items: center; justify-content: center; z-index: 50; }
+.start-card { background: #fff; border: 1px solid #999; border-radius: 12px; padding: 28px; max-width: 520px; display: flex; flex-direction: column; gap: 12px; text-align: center; }
+.start-card h1 { font-size: 22px; margin: 0; }
+.banner { background: #fdf3d7; border: 1px solid #d9c47a; border-radius: 8px; padding: 8px; font-size: 14px; margin: 0; }
+
+#modal-root .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 70; display: flex; align-items: center; justify-content: center; }
+.modal { background: #fff; border-radius: 12px; padding: 20px; max-width: 560px; width: min(560px, 92vw); max-height: 86vh; overflow-y: auto; }
+.modal h2 { margin-top: 0; }
+.modal .actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+.modal table { border-collapse: collapse; width: 100%; margin: 8px 0; }
+.modal th, .modal td { border: 1px solid #bbb; padding: 6px 8px; text-align: left; font-size: 15px; }
+.modal .unpriced td { background: #fff3cd; }
+.rate-input-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.rate-input-row input { width: 130px; font: inherit; padding: 8px; border: 1px solid #888; border-radius: 6px; min-height: 44px; }
+
+#toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 64px; background: #23324d; color: #fff; padding: 10px 18px; border-radius: 24px; z-index: 60; font-size: 15px; max-width: 80vw; }
+
+/* Print pack: app chrome hidden, black-and-white safe. */
+#print-pack { display: none; }
+@media print {
+  #app, #start, #toast, #modal-root { display: none !important; }
+  #print-pack { display: block; }
+  #print-pack .page { page-break-after: always; border-top: 2px solid #000; padding-top: 6px; margin-bottom: 12px; }
+  #print-pack .print-header { display: flex; justify-content: space-between; font-size: 9.5pt; border-bottom: 1px solid #000; }
+  #print-pack h2 { font-size: 11pt; margin: 8px 0 4px; }
+  #print-pack table { width: 100%; border-collapse: collapse; font-size: 9pt; }
+  #print-pack th, #print-pack td { border: 1px solid #000; padding: 3px 5px; text-align: left; }
+  #print-pack svg { max-width: 100%; height: auto; }
+  /* wall pages carry two wall drawings plus their tables: cap the drawings so
+     each .page fits one A4 sheet instead of spilling onto extra sheets */
+  #print-pack .page:nth-child(2) svg, #print-pack .page:nth-child(3) svg { max-height: 72mm; width: auto; }
+  #print-pack .disclaimer { font-size: 9pt; font-style: italic; margin-top: 8px; }
+}
+
+/* Portrait / narrow: inspector becomes a capped bottom sheet that can be collapsed. */
+@media (max-width: 1000px) {
+  .rates-label { display: none; } /* honesty copy stays on the start screen and in the quote */
+}
+@media (max-width: 800px) {
+  /* the canvas hint is redundant on narrow screens and overlapped the wall labels */
+  #hint { display: none; }
+}
+@media (max-width: 900px), (orientation: portrait) {
+  /* The running total and breakdown button must stay VISIBLE and clickable:
+     the quote bar stacks above the inspector sheet, and the sheet reserves the
+     bar's real measured height (--footer-h, kept in step by ui.js). */
+  #quote-bar { position: relative; z-index: 30; }
+  #inspector { position: fixed; left: 0; right: 0; bottom: 0; width: auto; max-height: 30vh; border-top: 2px solid #23324d; border-left: none; z-index: 20; box-shadow: 0 -4px 14px rgba(0,0,0,.3); padding-bottom: calc(var(--footer-h, 96px) + 14px); }
+  /* keep drawing space clear of the sheet: the canvas sits above the reserved band */
+  #canvas-wrap { padding-bottom: calc(30vh + var(--footer-h, 96px)); }
+  /* hint at the top so it never covers the Wall C label under the plan */
+  #hint { top: 8px; left: 50%; transform: translateX(-50%); bottom: auto; max-width: 62%; }
+  /* Clear sits at the top of the rail, above the sheet, not hidden behind it */
+  .rail-extra { margin-top: 8px; }
+  #place-palette { width: calc(100% - 110px); max-width: 460px; }
+}

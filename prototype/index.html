@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Room drawing to labour — prototype</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="css/style.css">
+<link rel="manifest" href="manifest.webmanifest">
+</head>
+<body>
+<div id="app" hidden>
+  <header id="topbar">
+    <span class="proto-label">PROTOTYPE</span>
+    <span class="rates-label">example rates</span>
+    <span id="sample-chip" class="chip sample-chip" hidden>Sample job — example data</span>
+    <button id="btn-job-name" class="job-name" title="Job name">…</button>
+    <span class="spacer"></span>
+    <button id="btn-undo" data-testid="undo" title="Undo (Ctrl+Z)">↶ Undo</button>
+    <button id="btn-redo" data-testid="redo" title="Redo (Ctrl+Y)">↷ Redo</button>
+    <span id="save-chip" class="chip" data-testid="save-chip">Saving…</span>
+    <span id="offline-chip" class="chip" data-testid="offline-chip">Getting ready for offline…</span>
+    <button id="btn-menu" title="Menu">⋯ Menu</button>
+  </header>
+
+  <div id="main">
+    <nav id="mode-rail" aria-label="Modes">
+      <button data-mode="select" class="mode-btn" title="Select (V)">▣<span>Select</span></button>
+      <button data-mode="place" class="mode-btn" title="Place (P)">＋<span>Place</span></button>
+      <button data-mode="draw" class="mode-btn" title="Draw (D)">✎<span>Draw</span></button>
+      <button data-mode="notes" class="mode-btn" title="Notes (N)">💬<span>Notes</span></button>
+      <div class="rail-extra">
+        <button id="btn-clear-ink" class="mode-btn" title="Clear sketches on this view">🧽<span>Clear</span></button>
+      </div>
+    </nav>
+
+    <div id="place-palette" hidden aria-label="Fitting types">
+      <p class="palette-title">Pick a fitting</p>
+      <!-- buttons injected -->
+    </div>
+
+    <div id="centre">
+      <div id="view-tabs" role="tablist" aria-label="Views">
+        <!-- tabs injected -->
+      </div>
+      <div id="canvas-wrap">
+        <svg id="canvas" data-testid="canvas" touch-action="none"></svg>
+        <div id="hint" data-testid="hint"></div>
+        <div id="zoom-controls">
+          <button id="btn-zoom-out" title="Zoom out">−</button>
+          <button id="btn-zoom-fit" title="Fit to view">Fit</button>
+          <button id="btn-zoom-in" title="Zoom in">＋</button>
+        </div>
+      </div>
+    </div>
+
+    <aside id="inspector" data-testid="inspector">
+      <!-- injected -->
+    </aside>
+  </div>
+
+  <footer id="quote-bar" data-testid="quote-bar">
+    <span id="quote-summary"></span>
+    <span class="spacer"></span>
+    <button id="btn-breakdown">Show breakdown ▲</button>
+  </footer>
+</div>
+
+<!-- Start screen -->
+<div id="start" data-testid="start" hidden>
+  <div class="start-card">
+    <h1>Room drawing to labour — prototype</h1>
+    <p class="banner" role="note">Example rates only. This isn't an electrical design or compliance tool.</p>
+    <p class="banner">Tested with simulated pen and touch. Not yet tried on a real Surface, and palm rejection is unverified.</p>
+    <button id="start-blank" data-testid="start-blank">Start a blank room</button>
+    <button id="start-sample" data-testid="start-sample">Open barber-shop sample</button>
+    <button id="start-continue" data-testid="start-continue" hidden>Carry on with current job</button>
+    <button id="start-import">Import a backup</button>
+  </div>
+</div>
+
+<div id="modal-root"></div>
+<div id="toast" data-testid="toast" hidden></div>
+<div id="print-pack" aria-hidden="true"></div>
+
+<input type="file" id="file-input" accept="application/json,.json" hidden>
+
+<script type="module" src="js/ui.js"></script>
+</body>
+</html>
