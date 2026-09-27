@@ -49,12 +49,20 @@ The service worker caches the app for offline use after the first online visit.
 
 ## Checks
 
-The development version passed 21 data tests and 28 browser journeys.
+The current version passed 20 data tests and 28 browser journeys.
 This download contains the runnable app and guide; development test tools and
 internal review records are kept separately. The print pack fits four A4 sheets:
 plan, walls A+B, walls C+D, and labour breakdown.
 
 ## Status
+
+On phones, details start closed to leave room for the drawing. Tap Details to
+edit a fitting or the room. Show breakdown opens a scrolling panel with Close
+and Edit rates kept within reach. The fitting picker sits below the drawing.
+
+When editing a position or note, press Enter or tap elsewhere before closing
+or reloading the page. Text still being edited is not saved until you leave
+its field.
 
 Complete for prototype review: placement, orientation oracle, drag/clamp,
 undo/redo, honest incomplete totals, import validation (hostile + sparse

@@ -15,7 +15,9 @@ let history = [];               // JSON snapshots (undo), limit 50
 let redoStack = [];
 let penSeen = false;
 let zoom = { s: 1, tx: 0, ty: 0 };
-let inspectorCollapsed = false; // portrait bottom sheet can be collapsed
+// Must match the phone media queries in style.css.
+const PHONE = window.matchMedia('(max-width: 600px), (max-height: 500px)');
+let inspectorCollapsed = PHONE.matches; // phones start with details closed so the drawing gets the screen
 let pendingRoom = null;         // room values awaiting shrink decision
 
 const $ = (sel) => document.querySelector(sel);
@@ -357,7 +359,7 @@ function renderTabs() {
   if (ceilN) defs.push({ v: null, label: `Ceiling fittings: ${ceilN} (plan only)`, n: ceilN, info: true });
   for (const d of defs) {
     if (d.info) {
-      tabs.appendChild(el('span', { style: 'align-self:center;font-size:13px;color:#555;padding:0 6px' }, d.label));
+      tabs.appendChild(el('span', { class: 'tabs-info', style: 'align-self:center;font-size:13px;color:#555;padding:0 6px' }, d.label));
       continue;
     }
     const b = el('button', { 'data-view': d.v, 'data-testid': `tab-${d.v}`, class: view === d.v ? 'active' : '' }, d.label);
@@ -374,10 +376,12 @@ function renderQuote() {
   sum.innerHTML = '';
   if (!job.items.length) { sum.textContent = 'No fittings yet.'; return; }
   const pricedQty = bd.rows.filter(r => r.status === 'priced').reduce((s, r) => s + r.qty, 0);
-  const chip = (txt) => { const s = el('span', { class: 'q-chip' }, txt); s.style.whiteSpace = 'nowrap'; return s; };
+  // Phones hide the q-count/q-priced/q-existing/q-detail/q-long parts (see
+  // style.css) so the bar stays short; the text content is the same everywhere.
+  const chip = (txt, cls) => { const s = el('span', { class: `q-chip ${cls}` }, txt); s.style.whiteSpace = 'nowrap'; return s; };
   sum.append(
-    chip(`${job.items.length} fittings`),
-    chip(`${pricedQty} priced`),
+    chip(`${job.items.length} fittings`, 'q-count'),
+    chip(`${pricedQty} priced`, 'q-priced'),
   );
   if (bd.unpricedCount) {
     // name exactly what needs a price: unpriced work types and unknown fitting IDs
@@ -385,20 +389,38 @@ function renderQuote() {
       ...bd.rows.filter(r => r.status === 'unpriced').map(r => r.label.toLowerCase()),
       ...job.items.filter(i => i.type === 'unknown').map(i => i.id),
     ];
-    const warn = chip(`${bd.unpricedCount} ${bd.unpricedCount === 1 ? 'needs' : 'need'} a price (${missing.join(', ')})`);
+    const warn = chip(null, 'q-warn');
+    warn.append(
+      el('span', { 'aria-hidden': 'true' }, '⚠ '),
+      `${bd.unpricedCount} ${bd.unpricedCount === 1 ? 'needs' : 'need'} a price`,
+      el('span', { class: 'q-detail' }, ` (${missing.join(', ')})`),
+    );
     sum.append(warn);
   }
-  const total = chip(bd.complete ? `Total ${C.formatPence(bd.totalPence)}` : `${C.formatPence(bd.totalPence)} so far — total incomplete`);
+  const total = chip(bd.complete ? `Total ${C.formatPence(bd.totalPence)}` : `${C.formatPence(bd.totalPence)} so far`, 'q-total');
+  if (!bd.complete) total.append(el('span', { class: 'q-long' }, ' — total incomplete'));
   sum.append(total);
-  if (bd.existingQty) sum.append(chip(`${bd.existingQty} existing not counted`));
+  if (bd.existingQty) sum.append(chip(`${bd.existingQty} existing not counted`, 'q-existing'));
+}
+
+function inspectorToggle() {
+  const toggle = el('button', { id: 'btn-inspector-toggle', class: 'inspector-toggle', 'aria-expanded': String(!inspectorCollapsed) }, inspectorCollapsed ? 'Details ▴' : 'Details ▾');
+  toggle.addEventListener('click', () => {
+    inspectorCollapsed = !inspectorCollapsed;
+    renderAll();
+    $('#inspector').scrollTop = 0;
+    // the panel is rebuilt, so hand focus to the new toggle
+    const next = $('#btn-inspector-toggle');
+    if (next) next.focus({ preventScroll: true });
+  });
+  return toggle;
 }
 
 function inspectorRoomPanel() {
   const box = $('#inspector');
   box.innerHTML = '';
   const title = el('h2', {}, 'Room');
-  const toggle = el('button', { id: 'btn-inspector-toggle', class: 'inspector-toggle' }, inspectorCollapsed ? 'Details ▴' : 'Details ▾');
-  toggle.addEventListener('click', () => { inspectorCollapsed = !inspectorCollapsed; renderAll(); });
+  const toggle = inspectorToggle();
   const head = el('div', { class: 'inspector-head' });
   head.append(title, toggle);
   box.appendChild(head);
@@ -441,8 +463,7 @@ function renderInspector() {
   if (!item) { inspectorRoomPanel(); return; }
   const box = $('#inspector');
   box.innerHTML = '';
-  const toggle = el('button', { id: 'btn-inspector-toggle', class: 'inspector-toggle' }, inspectorCollapsed ? 'Details ▴' : 'Details ▾');
-  toggle.addEventListener('click', () => { inspectorCollapsed = !inspectorCollapsed; renderAll(); });
+  const toggle = inspectorToggle();
   const done = el('button', { class: 'inspector-toggle' }, 'Done');
   done.addEventListener('click', () => { selectedId = null; renderAll(); });
   const head = el('div', { class: 'inspector-head' });
@@ -477,7 +498,7 @@ function renderInspector() {
   const mkNum = (idAttr, text, key) => {
     label(text);
     const row = el('div', { class: 'field-row' });
-    const input = el('input', { type: 'number', 'data-testid': idAttr, step: '10' });
+    const input = el('input', { type: 'number', inputmode: 'numeric', 'data-testid': idAttr, step: '10' });
     input.value = item[key];
     const minus = el('button', {}, '−50');
     const plus = el('button', {}, '+50');
@@ -546,6 +567,11 @@ function syncFooterHeight() {
   if (bar) document.documentElement.style.setProperty('--footer-h', (bar.offsetHeight + 2) + 'px');
 }
 window.addEventListener('resize', syncFooterHeight);
+// Crossing the phone breakpoint (resize, or a small tablet rotating) resets the
+// details panel to that layout's default: closed on phones, open elsewhere.
+const onPhoneChange = () => { inspectorCollapsed = PHONE.matches; renderAll(); };
+if (PHONE.addEventListener) PHONE.addEventListener('change', onPhoneChange);
+else PHONE.addListener(onPhoneChange);
 
 // ---- Room size form -----------------------------------------------------------
 function openRoomForm() {
@@ -553,7 +579,7 @@ function openRoomForm() {
   const fields = {};
   const mk = (key, labelTxt, max) => {
     box.appendChild(el('label', {}, labelTxt));
-    const i = el('input', { type: 'number', step: '0.01', min: '0.1', max: String(max), 'data-testid': `room-${key}` });
+    const i = el('input', { type: 'number', inputmode: 'decimal', step: '0.01', min: '0.1', max: String(max), 'data-testid': `room-${key}` });
     i.value = job.room[key] ?? '';
     box.appendChild(i);
     fields[key] = { input: i, max };
@@ -607,7 +633,7 @@ function openRates() {
   for (const k of C.RATE_KEYS) {
     const row = el('div', { class: 'rate-input-row' });
     row.appendChild(el('span', {}, C.TYPES[k].label));
-    const i = el('input', { type: 'number', step: '0.01', min: '0.01', 'data-testid': `rate-${k}` });
+    const i = el('input', { type: 'number', inputmode: 'decimal', step: '0.01', min: '0.01', 'data-testid': `rate-${k}` });
     i.value = C.rateFor(job, k) === null ? '' : (C.rateFor(job, k) / 100).toFixed(2);
     i.placeholder = 'unpriced';
     row.appendChild(i);
@@ -836,6 +862,9 @@ function openPrint() {
 // ---- Menu / start flows -----------------------------------------------------------
 function openMenu() {
   const box = el('div');
+  // Phones can scroll the status chips out of sight, so repeat them here.
+  const status = [$('#save-chip').textContent, $('#offline-chip').textContent, job.sample ? 'Sample job with example data' : 'Example rates only'];
+  box.appendChild(el('p', { class: 'menu-status', 'data-testid': 'menu-status', style: 'font-size:14px;margin:0 0 8px' }, status.join(' · ')));
   const items = [
     ['New job', () => { closeModal(); confirmNewJob(); }],
     ['Room size', () => { closeModal(); openRoomForm(); }],
@@ -1204,11 +1233,21 @@ $('#btn-zoom-out').addEventListener('click', () => { zoom.s = Math.max(0.5, zoom
 $('#btn-zoom-fit').addEventListener('click', () => { zoom = { s: 1, tx: 0, ty: 0 }; renderCanvas(); });
 
 document.addEventListener('keydown', (e) => {
-  if (e.target.matches('input, textarea, select')) return;
+  const inField = e.target.matches('input, textarea, select');
+  if (e.key === 'Escape' && inField) {
+    // In a dialog: close it (nothing typed there is kept without Save).
+    // In the details panel: blur, which commits the field through its change handler.
+    if (e.target.closest('#modal-root')) closeModal(); else e.target.blur();
+    return;
+  }
+  if (inField) return;
   if (e.ctrlKey && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
   else if ((e.ctrlKey && e.key.toLowerCase() === 'y') || (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'z')) { e.preventDefault(); redo(); }
   else if (e.key === 'Delete' && selectedId) { commit(() => { job.items = job.items.filter(i => i.id !== selectedId); }); toast(`${selectedId} deleted · Undo`); selectedId = null; renderAll(); }
-  else if (e.key === 'Escape') { selectedId = null; closeModal(); renderAll(); }
+  else if (e.key === 'Escape') {
+    if (PHONE.matches && !$('#modal-root').firstChild) inspectorCollapsed = true;
+    selectedId = null; closeModal(); renderAll();
+  }
   else if (e.key.toLowerCase() === 'v') setMode('select');
   else if (e.key.toLowerCase() === 'p') setMode('place');
   else if (e.key.toLowerCase() === 'd') setMode('draw');

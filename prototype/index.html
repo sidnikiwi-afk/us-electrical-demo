@@ -2,7 +2,7 @@
 <html lang="en-GB">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, interactive-widget=resizes-content">
 <title>Room drawing to labour — prototype</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="css/style.css">
@@ -16,11 +16,13 @@
     <span id="sample-chip" class="chip sample-chip" hidden>Sample job — example data</span>
     <button id="btn-job-name" class="job-name" title="Job name">…</button>
     <span class="spacer"></span>
-    <button id="btn-undo" data-testid="undo" title="Undo (Ctrl+Z)">↶ Undo</button>
-    <button id="btn-redo" data-testid="redo" title="Redo (Ctrl+Y)">↷ Redo</button>
-    <span id="save-chip" class="chip" data-testid="save-chip">Saving…</span>
-    <span id="offline-chip" class="chip" data-testid="offline-chip">Getting ready for offline…</span>
-    <button id="btn-menu" title="Menu">⋯ Menu</button>
+    <button id="btn-undo" data-testid="undo" title="Undo (Ctrl+Z)" aria-label="Undo">↶<span class="btn-text"> Undo</span></button>
+    <button id="btn-redo" data-testid="redo" title="Redo (Ctrl+Y)" aria-label="Redo">↷<span class="btn-text"> Redo</span></button>
+    <span id="status-strip">
+      <span id="save-chip" class="chip" data-testid="save-chip">Saving…</span>
+      <span id="offline-chip" class="chip" data-testid="offline-chip">Getting ready for offline…</span>
+    </span>
+    <button id="btn-menu" title="Menu" aria-label="Menu">⋯<span class="btn-text"> Menu</span></button>
   </header>
 
   <div id="main">
