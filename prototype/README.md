@@ -67,6 +67,12 @@ still takes priority. Simulated palm lift/cancel checks passed; real iPadOS
 Safari and Pencil behaviour remain unverified. An update may need a second
 refresh before the new layout appears; saved jobs stay in the same browser.
 
+The Draw tool accepts wider finger contacts when no pen is active, and Clear
+sketches keeps the current tool selected. Menu includes a local Drawing check
+with build “iPad finger update 2” and the last input result. It contains no job
+content and sends nothing to a server. Browser-injected touch checks supplement
+the earlier synthetic-event tests; actual iPad confirmation is still needed.
+
 When editing a position or note, press Enter or tap elsewhere before closing
 or reloading the page. Text still being edited is not saved until you leave
 its field.

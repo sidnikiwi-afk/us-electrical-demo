@@ -19,4 +19,6 @@ The prototype keeps one current job in this browser. Download backups for safeke
 
 If the old Details button remains after an update, refresh once more. Keep using the same browser and address so your saved job stays available.
 
+If finger drawing still does not work, select Draw and try one line, then open Menu. The Drawing check at the bottom shows the version and what happened to your touch. It stays on your device. The latest version says “iPad finger update 2”.
+
 After typing a position or note, press Enter or tap another control before closing or reloading. An edit still in its field may not have been saved yet.

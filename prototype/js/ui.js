@@ -882,6 +882,10 @@ function openMenu() {
     b.addEventListener('click', fn);
     box.appendChild(b);
   }
+  const check = el('div', { class: 'drawing-check', 'data-testid': 'drawing-check', style: 'font-size:13px;margin-top:12px;border-top:1px solid #ccc;padding-top:8px' });
+  check.appendChild(el('p', { style: 'margin:0 0 4px;font-weight:600' }, 'Drawing check (for support)'));
+  for (const line of drawingCheckLines()) check.appendChild(el('p', { style: 'margin:0' }, line));
+  box.appendChild(check);
   modal('Menu', [box], [{ label: 'Close', class: 'btn-primary', fn: closeModal }]);
 }
 
@@ -973,7 +977,62 @@ let fingerToastAt = -Infinity, wideToastAt = -Infinity;
 const penNear = () => performance.now() - lastPenAt < PEN_GRACE_MS
   || [...pointers.values()].some(q => q.type === 'pen');
 // Last input outcome, readable by QA on the element; no effect on behaviour.
-function noteInput(e, outcome) { $('#canvas').dataset.lastInput = `${e.pointerType}:${outcome}`; }
+function noteInput(e, outcome) {
+  $('#canvas').dataset.lastInput = `${e.pointerType}:${outcome}`;
+  if (e.pointerId === lastDown.id) lastDown.outcome = outcome;
+}
+
+// Local-only drawing check shown in the Menu for support calls. Holds pointer
+// facts only, never job content, and is never sent anywhere.
+const BUILD_LABEL = 'iPad finger update 2';
+let downCount = 0;
+let lastDown = { id: null };
+function startDiag(e) {
+  downCount += 1;
+  lastDown = { id: e.pointerId, type: e.pointerType, width: e.width, tool: mode, outcome: '', moves: 0, end: '', capture: '' };
+}
+function endDiag(e, how) {
+  if (e.pointerId === lastDown.id && !lastDown.end) lastDown.end = how; // first ending wins
+}
+const TOOL_LABEL = { select: 'Select', place: 'Place', draw: 'Draw', notes: 'Notes' };
+const DEVICE_LABEL = { touch: 'finger', pen: 'pen', mouse: 'mouse' };
+function outcomeText(o) {
+  if (!o) return 'nothing happened yet';
+  if (o.startsWith('ignored-wide-')) return `ignored as a palm (contact ${o.slice(13)} px wide)`;
+  return {
+    'draw': 'started a sketch line',
+    'ignored-pen-down': 'ignored because the pen was touching',
+    'pinch': 'two fingers, so it zoomed',
+    'no-drawing': 'ignored because the room size isn’t set',
+    'sketch-limit': 'ignored because this view has too many sketches',
+    'select': 'picked up a fitting',
+    'pan': 'moved the drawing',
+    'pan-pen-mode': 'moved the drawing (a pen was used, so fingers only move it)',
+    'place': 'placed a fitting',
+    'note': 'opened a note',
+  }[o] || o;
+}
+const END_TEXT = { up: 'lifted normally', cancel: 'cancelled by the browser', 'capture-lost': 'the page lost track of it before it lifted' };
+function drawingCheckLines() {
+  const lines = [`Build: ${BUILD_LABEL}`, `Tool now: ${TOOL_LABEL[mode] || mode}`];
+  if (typeof window.PointerEvent === 'undefined') {
+    lines.push('This browser doesn’t support pointer events, so the drawing can’t respond to touch.');
+    return lines;
+  }
+  if (!downCount) {
+    lines.push('No finger, pen or mouse has reached the drawing since this page opened.');
+    return lines;
+  }
+  const d = lastDown;
+  lines.push(
+    `Last touch: ${DEVICE_LABEL[d.type] || d.type || 'unknown'} in ${TOOL_LABEL[d.tool] || d.tool}, ${outcomeText(d.outcome)}`,
+    `Contact width: ${typeof d.width === 'number' && d.width > 0 ? Math.round(d.width) + ' px' : 'not reported'}`,
+    `Movement events: ${d.moves}`,
+    `Ended: ${END_TEXT[d.end] || 'still down or not reported'}`,
+  );
+  if (d.capture === 'failed') lines.push('Pointer capture: failed');
+  return lines;
+}
 
 function renderFingerMode() {
   const b = $('#btn-finger-draw');
@@ -1041,6 +1100,7 @@ function doPinch() {
 $('#canvas').addEventListener('pointerdown', (e) => {
   e.preventDefault();
   const canvas = $('#canvas');
+  startDiag(e);
   // A primary pointer means the browser has no other contact of this kind down,
   // so any we still track of that kind lost its pointerup. Forget it, or every
   // later single touch would start a pinch.
@@ -1055,13 +1115,18 @@ $('#canvas').addEventListener('pointerdown', (e) => {
   } else if (e.pointerType === 'touch') {
     // stray-tap / palm guard: very wide touches, or touch while pen is down
     const penDown = [...pointers.values()].some(q => q.type === 'pen');
-    if (penDown || e.width > 40) {
+    // A fingertip can be reported wider than 40 px. A finger that is
+    // about to draw (Draw tool, no pen in use, fingers allowed to draw) skips the
+    // width check; every other tool, and any touch near pen use, keeps it.
+    const fingerWillDraw = mode === 'draw' && !penNear() && (!penSeen || fingerDraws);
+    if (penDown || (e.width > 40 && !fingerWillDraw)) {
       noteInput(e, penDown ? 'ignored-pen-down' : `ignored-wide-${Math.round(e.width)}`);
       if (!penDown && !penNear()) explainWideTouch(e.width);
       return;
     }
   }
-  try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic/untracked pointer: events still arrive */ }
+  try { canvas.setPointerCapture(e.pointerId); lastDown.capture = 'ok'; }
+  catch { lastDown.capture = 'failed'; /* synthetic/untracked pointer: events still arrive */ }
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
   if (pointers.size === 2) { startPinch(); noteInput(e, 'pinch'); return; }
   if (pinch) return;
@@ -1090,6 +1155,7 @@ $('#canvas').addEventListener('pointerdown', (e) => {
   if (mode === 'place' && !fingerOnly) { noteInput(e, 'place'); placeAt(p); return; }
   if (mode === 'draw' && !fingerOnly) {
     if ((job.annotations[view] || []).length >= C.LIMITS.maxStrokesPerView) {
+      noteInput(e, 'sketch-limit');
       toast(`Sketch limit reached on this view (${C.LIMITS.maxStrokesPerView}) — clear sketches to add more.`);
       return;
     }
@@ -1156,6 +1222,7 @@ function placeAt(p) {
 
 $('#canvas').addEventListener('pointermove', (e) => {
   if (e.pointerType === 'pen') lastPenAt = performance.now(); // includes hover
+  if (e.pointerId === lastDown.id && !lastDown.end) lastDown.moves += 1;
   if (!pointers.has(e.pointerId)) return;
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType, down: true });
   if (pinch && pointers.size === 2) { doPinch(); return; }
@@ -1219,6 +1286,7 @@ $('#canvas').addEventListener('pointermove', (e) => {
 function endPointer(e) {
   // Ignored contacts (a palm, or a finger dropped for the pen) must not end the
   // pen's stroke or drag.
+  endDiag(e, 'up');
   if (!pointers.has(e.pointerId)) return;
   pointers.delete(e.pointerId);
   if (e.pointerType === 'pen') lastPenAt = performance.now();
@@ -1249,6 +1317,7 @@ function endPointer(e) {
 function cancelPointer(e) {
   // A cancelled palm is ignored; a cancelled owner drops the interaction
   // entirely (drag reverted to its pre-drag snapshot, no partial stroke saved).
+  endDiag(e, 'cancel');
   if (!pointers.has(e.pointerId)) return;
   pointers.delete(e.pointerId);
   if (e.pointerType === 'pen') lastPenAt = performance.now();
@@ -1260,6 +1329,9 @@ for (const target of [$('#canvas'), window]) {
   target.addEventListener('pointerup', endPointer);
   target.addEventListener('pointercancel', cancelPointer);
 }
+// Recorded for the Menu check only. A normal pointerup or the Notes tool's own
+// release has already stopped tracking the pointer, so neither counts as lost.
+$('#canvas').addEventListener('lostpointercapture', (e) => { if (pointers.has(e.pointerId)) endDiag(e, 'capture-lost'); });
 $('#btn-finger-draw').addEventListener('click', () => {
   fingerDraws = !fingerDraws;
   renderFingerMode();
@@ -1277,13 +1349,15 @@ $('#canvas').addEventListener('wheel', (e) => {
 }, { passive: false });
 
 // ---- Modes / palette ------------------------------------------------------------
+const MODES = ['select', 'place', 'draw', 'notes'];
 function setMode(m) {
+  if (!MODES.includes(m)) return;
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   $('#place-palette').hidden = m !== 'place';
   renderCanvas();
 }
-document.querySelectorAll('.mode-btn').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
+document.querySelectorAll('.mode-btn[data-mode]').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
 
 function buildPalette() {
   const pal = $('#place-palette');
