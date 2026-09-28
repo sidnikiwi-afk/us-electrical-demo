@@ -403,8 +403,10 @@ function renderQuote() {
   if (bd.existingQty) sum.append(chip(`${bd.existingQty} existing not counted`, 'q-existing'));
 }
 
+// Phones: a bottom sheet that shrinks to its header. Tablet and desktop: a right
+// drawer that shrinks to a narrow strip holding only this button (style.css).
 function inspectorToggle() {
-  const toggle = el('button', { id: 'btn-inspector-toggle', class: 'inspector-toggle', 'aria-expanded': String(!inspectorCollapsed) }, inspectorCollapsed ? 'Details ▴' : 'Details ▾');
+  const toggle = el('button', { id: 'btn-inspector-toggle', class: 'inspector-toggle', 'aria-expanded': String(!inspectorCollapsed) }, inspectorCollapsed ? 'Show details' : 'Hide details');
   toggle.addEventListener('click', () => {
     inspectorCollapsed = !inspectorCollapsed;
     renderAll();
@@ -464,7 +466,7 @@ function renderInspector() {
   const box = $('#inspector');
   box.innerHTML = '';
   const toggle = inspectorToggle();
-  const done = el('button', { class: 'inspector-toggle' }, 'Done');
+  const done = el('button', { class: 'inspector-toggle inspector-done' }, 'Done');
   done.addEventListener('click', () => { selectedId = null; renderAll(); });
   const head = el('div', { class: 'inspector-head' });
   head.append(el('h2', {}, `${item.id} · ${C.TYPES[item.type].label}`), toggle, done);
@@ -958,8 +960,59 @@ $('#file-input').addEventListener('change', (e) => {
 });
 
 // ---- Pointer interaction --------------------------------------------------------------
-const pointers = new Map(); // pointerId → {x,y}
+const pointers = new Map(); // pointerId → {x,y,type}
 let dragFitting = null, drawingStroke = null, panning = null, pinch = null;
+let owner = null;               // pointerId that started the current drag, stroke or pan
+// Palm protection: fingers only pan while a pen is touching, hovering (where the
+// hardware reports hover) or was lifted less than this long ago.
+const PEN_GRACE_MS = 1000;
+let lastPenAt = -Infinity;
+let fingerDraws = false;        // user's choice, offered once a pen has been seen
+let fingerToastAt = -Infinity, wideToastAt = -Infinity;
+
+const penNear = () => performance.now() - lastPenAt < PEN_GRACE_MS
+  || [...pointers.values()].some(q => q.type === 'pen');
+// Last input outcome, readable by QA on the element; no effect on behaviour.
+function noteInput(e, outcome) { $('#canvas').dataset.lastInput = `${e.pointerType}:${outcome}`; }
+
+function renderFingerMode() {
+  const b = $('#btn-finger-draw');
+  b.hidden = !penSeen;
+  b.setAttribute('aria-pressed', String(fingerDraws));
+  b.innerHTML = '';
+  b.append(el('span', { 'aria-hidden': 'true' }, '✋ '), fingerDraws ? 'Finger drawing: on' : 'Finger drawing: off');
+  b.title = fingerDraws
+    ? 'Fingers draw and place too. They still only move the drawing while the pen is in use.'
+    : 'A pen was used, so fingers only move and zoom the drawing. Tap to let fingers draw too.';
+}
+function explainFingerPan() {
+  if (fingerDraws || performance.now() - fingerToastAt < 8000) return;
+  fingerToastAt = performance.now();
+  toast('A pen was used here, so fingers only move and zoom the drawing. Tap “Finger drawing: off” to let fingers draw too.', 5000);
+}
+function explainWideTouch(width) {
+  if (performance.now() - wideToastAt < 8000) return;
+  wideToastAt = performance.now();
+  toast(`Touch ignored: the contact was ${Math.round(width)} px wide, so it was treated as a palm. Try a fingertip.`, 4000);
+}
+
+// Drop whatever is in progress without saving any part of it.
+function cancelInteraction() {
+  const drag = dragFitting;
+  pinch = null; drawingStroke = null; panning = null; dragFitting = null; owner = null;
+  if (drag) { job = C.normaliseJob(JSON.parse(drag.pre)); renderAll(); }
+  else renderCanvas();
+}
+// Stop tracking every pointer of one type, cancelling what they had started.
+function dropPointers(type) {
+  let hit = false;
+  for (const [id, q] of pointers) {
+    if (q.type !== type) continue;
+    pointers.delete(id);
+    if (id === owner || pinch) hit = true;
+  }
+  if (hit) cancelInteraction();
+}
 
 function svgPoint(e) {
   const svg = $('#canvas');
@@ -971,10 +1024,10 @@ function svgPoint(e) {
   pt.x = e.clientX; pt.y = e.clientY;
   return pt.matrixTransform(ctm.inverse());
 }
-function startPinch(e) {
+function startPinch() {
+  cancelInteraction(); // a half-finished drag is reverted, not left moved without an undo step
   const [a, b] = [...pointers.values()];
   pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), s: zoom.s };
-  dragFitting = null; drawingStroke = null; panning = null;
 }
 function doPinch() {
   const [a, b] = [...pointers.values()];
@@ -987,43 +1040,69 @@ function doPinch() {
 
 $('#canvas').addEventListener('pointerdown', (e) => {
   e.preventDefault();
-  if (e.pointerType === 'pen') penSeen = true;
-  // stray-tap / palm guard: very wide touches, or touch while pen is down
-  const penDown = [...pointers.values()].some(p => p.type === 'pen');
-  if (e.pointerType === 'touch' && (e.width > 40 || penDown)) return;
-  try { $('#canvas').setPointerCapture(e.pointerId); } catch { /* synthetic/untracked pointer: events still arrive */ }
+  const canvas = $('#canvas');
+  // A primary pointer means the browser has no other contact of this kind down,
+  // so any we still track of that kind lost its pointerup. Forget it, or every
+  // later single touch would start a pinch.
+  if (e.isPrimary) dropPointers(e.pointerType);
+  if (e.pointerType === 'pen') {
+    penSeen = true;
+    lastPenAt = performance.now();
+    // The pen wins over fingers already down (usually a resting palm): drop them
+    // and anything they started, so the pen is neither ignored nor made a pinch.
+    dropPointers('touch');
+    renderFingerMode();
+  } else if (e.pointerType === 'touch') {
+    // stray-tap / palm guard: very wide touches, or touch while pen is down
+    const penDown = [...pointers.values()].some(q => q.type === 'pen');
+    if (penDown || e.width > 40) {
+      noteInput(e, penDown ? 'ignored-pen-down' : `ignored-wide-${Math.round(e.width)}`);
+      if (!penDown && !penNear()) explainWideTouch(e.width);
+      return;
+    }
+  }
+  try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic/untracked pointer: events still arrive */ }
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
-  if (pointers.size === 2) { startPinch(e); return; }
+  if (pointers.size === 2) { startPinch(); noteInput(e, 'pinch'); return; }
   if (pinch) return;
 
-  // After a pen has been seen this session, fingers only pan and zoom.
-  const fingerOnly = e.pointerType === 'touch' && penSeen;
+  // Once a pen has been seen, fingers only pan and zoom unless the user turns
+  // finger drawing on; even then, not while the pen is in use.
+  const fingerOnly = e.pointerType === 'touch' && penSeen && (!fingerDraws || penNear());
   const p = svgPoint(e);
-  if (!p) return; // room not set yet (e.g. blank job, room form dismissed)
+  if (!p) { noteInput(e, 'no-drawing'); return; } // room not set yet (e.g. blank job, room form dismissed)
   const hitFitting = e.target.closest ? e.target.closest('.fitting') : null;
+  if (fingerOnly && (mode !== 'select' || hitFitting)) explainFingerPan();
 
   if (mode === 'select' && !fingerOnly) {
     if (hitFitting) {
       selectedId = hitFitting.getAttribute('data-id');
       dragFitting = { id: selectedId, moved: false, pre: snapshot() };
-      renderAll();
     } else {
       selectedId = null;
       panning = { sx: e.clientX, sy: e.clientY, tx: zoom.tx, ty: zoom.ty };
-      renderAll();
     }
+    owner = e.pointerId;
+    noteInput(e, hitFitting ? 'select' : 'pan');
+    renderAll();
     return;
   }
-  if (mode === 'place' && !fingerOnly) { placeAt(p); return; }
+  if (mode === 'place' && !fingerOnly) { noteInput(e, 'place'); placeAt(p); return; }
   if (mode === 'draw' && !fingerOnly) {
     if ((job.annotations[view] || []).length >= C.LIMITS.maxStrokesPerView) {
       toast(`Sketch limit reached on this view (${C.LIMITS.maxStrokesPerView}) — clear sketches to add more.`);
       return;
     }
     drawingStroke = { points: [[Math.round(p.x), Math.round(p.y)]] };
+    owner = e.pointerId;
+    noteInput(e, 'draw');
     return;
   }
   if (mode === 'notes' && !fingerOnly) {
+    // The prompt below can swallow this pointer's pointerup; stop tracking it now.
+    pointers.delete(e.pointerId);
+    try { canvas.releasePointerCapture(e.pointerId); } catch { /* not captured */ }
+    noteInput(e, 'note');
     if ((job.notePins || []).length >= 100) {
       toast('Note limit reached (100) — delete a note before adding another.');
       return;
@@ -1038,6 +1117,8 @@ $('#canvas').addEventListener('pointerdown', (e) => {
   }
   // finger (or empty-area touch) pans
   panning = { sx: e.clientX, sy: e.clientY, tx: zoom.tx, ty: zoom.ty };
+  owner = e.pointerId;
+  noteInput(e, fingerOnly ? 'pan-pen-mode' : 'pan');
 });
 
 function placeAt(p) {
@@ -1074,9 +1155,11 @@ function placeAt(p) {
 }
 
 $('#canvas').addEventListener('pointermove', (e) => {
+  if (e.pointerType === 'pen') lastPenAt = performance.now(); // includes hover
   if (!pointers.has(e.pointerId)) return;
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType, down: true });
   if (pinch && pointers.size === 2) { doPinch(); return; }
+  if (e.pointerId !== owner) return; // only the pointer that started a drag, stroke or pan moves it
   const p = svgPoint(e);
   if (!p) return; // nothing drawable yet
   if (dragFitting) {
@@ -1134,8 +1217,14 @@ $('#canvas').addEventListener('pointermove', (e) => {
 });
 
 function endPointer(e) {
+  // Ignored contacts (a palm, or a finger dropped for the pen) must not end the
+  // pen's stroke or drag.
+  if (!pointers.has(e.pointerId)) return;
   pointers.delete(e.pointerId);
+  if (e.pointerType === 'pen') lastPenAt = performance.now();
   if (pointers.size < 2) pinch = null;
+  if (e.pointerId !== owner) return;
+  owner = null;
   if (dragFitting) {
     if (dragFitting.moved) {
       // one history entry for the whole drag (snapshot taken before it started)
@@ -1157,17 +1246,26 @@ function endPointer(e) {
   }
   panning = null;
 }
-$('#canvas').addEventListener('pointerup', endPointer);
-$('#canvas').addEventListener('pointercancel', (e) => {
-  // drop the interaction entirely; no partial move saved
+function cancelPointer(e) {
+  // A cancelled palm is ignored; a cancelled owner drops the interaction
+  // entirely (drag reverted to its pre-drag snapshot, no partial stroke saved).
+  if (!pointers.has(e.pointerId)) return;
   pointers.delete(e.pointerId);
-  pinch = null; drawingStroke = null; panning = null;
-  if (dragFitting) {
-    // revert the in-progress drag to its pre-drag snapshot
-    job = C.normaliseJob(JSON.parse(dragFitting.pre));
-    dragFitting = null;
-    renderAll();
-  }
+  if (e.pointerType === 'pen') lastPenAt = performance.now();
+  if (e.pointerId === owner || pinch) cancelInteraction();
+}
+// Window listeners catch a pointerup or cancel that lands off the canvas when
+// capture failed. Each handler is a no-op for a pointer already handled.
+for (const target of [$('#canvas'), window]) {
+  target.addEventListener('pointerup', endPointer);
+  target.addEventListener('pointercancel', cancelPointer);
+}
+$('#btn-finger-draw').addEventListener('click', () => {
+  fingerDraws = !fingerDraws;
+  renderFingerMode();
+  toast(fingerDraws
+    ? 'Fingers can draw and place now. While the pen is in use they still only move the drawing.'
+    : 'Fingers only move and zoom the drawing. The pen draws.');
 });
 
 // Wheel zoom (desktop convenience)
@@ -1297,5 +1395,6 @@ if ('serviceWorker' in navigator) {
 // ---- Boot ------------------------------------------------------------------------------
 buildPalette();
 setMode('select');
+renderFingerMode();
 const savedJob = loadSaved();
 if (savedJob) beginJob(savedJob); else showStart();

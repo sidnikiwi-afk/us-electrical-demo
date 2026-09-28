@@ -7,7 +7,7 @@ in this browser on this device (`localStorage`), plus downloadable JSON/CSV
 backups and a print pack.
 
 **Example labour rates only. Not a quotation, electrical design or compliance
-tool. Tested with simulated pen and touch — not yet tried on a real Surface,
+tool. Tested with simulated pen and touch — not yet tried on a real iPad or Surface,
 and palm rejection is unverified.**
 
 ## Run it
@@ -56,9 +56,16 @@ plan, walls A+B, walls C+D, and labour breakdown.
 
 ## Status
 
-On phones, details start closed to leave room for the drawing. Tap Details to
-edit a fitting or the room. Show breakdown opens a scrolling panel with Close
+On phones, details start closed to leave room for the drawing. Tap Show details to
+edit a fitting or the room. On tablets and computers, Hide details retracts the
+right panel and expands the drawing. Show breakdown opens a scrolling panel with Close
 and Edit rates kept within reach. The fitting picker sits below the drawing.
+
+After pen input, fingers move and zoom by default. Turn Finger drawing on to
+draw or place with a finger too. A pen in use, or used within the last second,
+still takes priority. Simulated palm lift/cancel checks passed; real iPadOS
+Safari and Pencil behaviour remain unverified. An update may need a second
+refresh before the new layout appears; saved jobs stay in the same browser.
 
 When editing a position or note, press Enter or tap elsewhere before closing
 or reloading the page. Text still being edited is not saved until you leave
@@ -67,9 +74,9 @@ its field.
 Complete for prototype review: placement, orientation oracle, drag/clamp,
 undo/redo, honest incomplete totals, import validation (hostile + sparse
 backups), caps, offline service worker, print pack, portrait layout with the
-total and breakdown always visible and clickable above the bottom sheet.
+total and breakdown reachable on phones and tablets.
 
-Not complete / known limits: no real Surface hardware testing (simulated pen
+Not complete / known limits: no real iPad or Surface hardware testing (simulated pen
 and touch only), no multi-room jobs, no cloud sync (by design); the print pack
 fits four A4 sheets (verified via `pdftoppm` renders) but its legibility on
 physical paper has not been reviewed by a human.
