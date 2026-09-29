@@ -19,6 +19,19 @@ let zoom = { s: 1, tx: 0, ty: 0 };
 const PHONE = window.matchMedia('(max-width: 600px), (max-height: 500px)');
 let inspectorCollapsed = PHONE.matches; // phones start with details closed so the drawing gets the screen
 let pendingRoom = null;         // room values awaiting shrink decision
+// Layer visibility is view state only: never saved, reset to all on job open.
+let shownLayers = new Set(C.LAYERS);
+let layersOpen = false;
+const allShown = () => shownLayers.size === C.LAYERS.length;
+const isShown = (item) => shownLayers.has(C.layerOf(item));
+// Called inside a commit so the fitting is visible before renderAll runs.
+// Returns the revealed layer's label, or null if it was already shown.
+function revealLayerOf(id) {
+  const it = job.items.find(i => i.id === id);
+  if (!it || isShown(it)) return null;
+  shownLayers.add(C.layerOf(it));
+  return C.LAYER_LABELS[C.layerOf(it)];
+}
 
 const $ = (sel) => document.querySelector(sel);
 const svgEl = (name, attrs = {}, parent = null) => {
@@ -212,6 +225,11 @@ function fittingGlyph(item, x, y, labelBelow = true) {
     svgEl('rect', { x: -110, y: -110, width: 220, height: 220, fill: '#fff', stroke: col, 'stroke-width': 25 }, g);
     svgEl('line', { x1: -110, y1: -110, x2: 110, y2: 110, stroke: col, 'stroke-width': 18 }, g);
     svgEl('line', { x1: 110, y1: -110, x2: -110, y2: 110, stroke: col, 'stroke-width': 18 }, g);
+  } else if (item.type === 'spur') {
+    svgEl('rect', { x: -110, y: -110, width: 220, height: 220, fill: '#fff', stroke: col, 'stroke-width': 25 }, g);
+    svgEl('line', { x1: -110, y1: 0, x2: 110, y2: 0, stroke: col, 'stroke-width': 18 }, g);
+  } else if (item.type === 'threephase') {
+    svgEl('polygon', { points: '0,-135 125,100 -125,100', fill: '#fff', stroke: col, 'stroke-width': 25, 'stroke-linejoin': 'round' }, g);
   } else {
     svgEl('rect', { x: -110, y: -110, width: 220, height: 220, fill: '#fff', stroke: col, 'stroke-width': 25 }, g);
   }
@@ -220,7 +238,9 @@ function fittingGlyph(item, x, y, labelBelow = true) {
   return g;
 }
 
-function renderPlan(content, { W, D }) {
+// `show` decides which fittings are drawn. Room outline, labels and sketches
+// are always drawn: they belong to every layer.
+function renderPlan(content, { W, D }, show = isShown) {
   svgEl('rect', { x: 0, y: 0, width: W, height: D, fill: '#fff', stroke: '#1a1a1a', 'stroke-width': 25 }, content);
   // wall labels: one label per wall, each with its length
   const dims = [
@@ -242,6 +262,7 @@ function renderPlan(content, { W, D }) {
   const labelFits = (x, gy, below) => !placedLabels.some(q =>
     q.below === below && Math.abs(q.x - x) < 900 && Math.abs(q.gy - gy) < 600);
   for (const item of job.items) {
+    if (!show(item)) continue;
     if (item.wall === C.CEILING) {
       const g = fittingGlyph(item, item.fromLeftMm, item.heightMm, true);
       g.setAttribute('opacity', '0.75');
@@ -265,7 +286,7 @@ function renderPlan(content, { W, D }) {
   return { margin: 500 };
 }
 
-function renderWall(content, wall, { W, D, H }, forPrint = false) {
+function renderWall(content, wall, { W, D, H }, forPrint = false, show = isShown) {
   const L = (wall === 'A' || wall === 'C') ? W : D;
   svgEl('line', { x1: 0, y1: H, x2: L, y2: H, stroke: '#1a1a1a', 'stroke-width': 40 }, content); // floor line
   const hT = svgEl('text', { x: L + 380, y: H / 2, 'font-size': 240, fill: '#555', 'font-family': 'inherit', 'text-anchor': 'middle', transform: `rotate(-90 ${L + 380} ${H / 2})` }, content);
@@ -273,6 +294,7 @@ function renderWall(content, wall, { W, D, H }, forPrint = false) {
   const lT = svgEl('text', { x: L / 2, y: H + 420, 'font-size': 260, fill: '#23324d', 'text-anchor': 'middle', 'font-family': 'inherit' }, content);
   lT.textContent = `Wall ${wall} · ${(L / 1000).toFixed(2)} m — viewed from inside`;
   for (const item of job.items) {
+    if (!show(item)) continue;
     if (item.wall === C.CEILING) {
       // Printed wall drawings omit the projection ticks: the small grey labels
       // collide at print scale, and the ceiling table on the same page already
@@ -290,7 +312,7 @@ function renderWall(content, wall, { W, D, H }, forPrint = false) {
       }[wall];
       svgEl('line', { x1: along, y1: 0, x2: along, y2: 120, stroke: '#999', 'stroke-width': 25, 'stroke-dasharray': '60 40' }, content);
       const t = svgEl('text', { x: along, y: -140, 'font-size': 150, fill: '#777', 'text-anchor': 'middle', 'font-family': 'inherit' }, content);
-      t.textContent = `${item.id}·DL (ceiling)`;
+      t.textContent = `${item.id}·${C.TYPES[item.type].symbol} (ceiling)`;
       continue;
     }
     if (item.wall !== wall) continue;
@@ -310,7 +332,7 @@ function renderWall(content, wall, { W, D, H }, forPrint = false) {
 function renderCanvas() {
   const svg = $('#canvas');
   svg.innerHTML = '';
-  if (!job || !job.room || !job.room.widthM) { svg.setAttribute('viewBox', '0 0 100 100'); return; }
+  if (!job || !job.room || !job.room.widthM) { svg.setAttribute('viewBox', '0 0 100 100'); renderLayerEmpty(); return; }
   const dims = roomMm();
   let vbW, vbH;
   if (view === 'PLAN') { vbW = dims.W + 1800; vbH = dims.D + 1800; }
@@ -334,12 +356,95 @@ function renderCanvas() {
     const sel = svg.querySelector(`.fitting[data-id="${selectedId}"]`);
     if (sel) { const r = svgEl('rect', { x: -180, y: -180, width: 360, height: 360, fill: 'none', stroke: '#2266cc', 'stroke-width': 40 }); sel.insertBefore(r, sel.firstChild); }
   }
+  const placeLayerHidden = !shownLayers.has(C.defaultLayerFor(placeType));
   $('#hint').textContent = {
     select: 'Tap a fitting to select it. Drag to move.',
-    place: C.TYPES[placeType].label + (placeType === 'downlight' ? ' — tap the ceiling in the plan view.' : ' — tap on the wall where the fitting goes.'),
-    draw: 'Sketches are notes only. They are never priced.',
-    notes: 'Tap to add a note.',
+    place: C.TYPES[placeType].label + (placeType === 'downlight' ? ' — tap the ceiling in the plan view.' : ' — tap on the wall where the fitting goes.')
+      + (placeLayerHidden ? ` Its layer (${C.LAYER_LABELS[C.defaultLayerFor(placeType)]}) is hidden and will be shown when you place it.` : ''),
+    draw: 'Sketches are notes only, shared by all layers. They are never priced.',
+    notes: 'Tap to add a note. Notes are shared by all layers.',
   }[mode];
+  renderLayerEmpty();
+}
+
+// Shown over the drawing when the layer filter leaves nothing to see on this view.
+function renderLayerEmpty() {
+  const box = $('#layer-empty');
+  let msg = '';
+  if (job && job.room && job.room.widthM) {
+    const here = view === 'PLAN' ? job.items : job.items.filter(i => i.wall === view || i.wall === C.CEILING);
+    const hiddenHere = here.filter(i => !isShown(i)).length;
+    if (!shownLayers.size) msg = `All layers are hidden.${hiddenHere ? ` ${hiddenHere} fitting${hiddenHere === 1 ? '' : 's'} on this view aren’t shown.` : ''}`;
+    else if (here.length && hiddenHere === here.length) msg = `Nothing shown on this view. ${hiddenHere} fitting${hiddenHere === 1 ? ' is' : 's are'} on hidden layers.`;
+  }
+  box.hidden = !msg;
+  if (box.dataset.msg === msg) return;
+  box.dataset.msg = msg;
+  box.innerHTML = '';
+  if (!msg) return;
+  const all = el('button', { class: 'btn-primary', 'data-testid': 'layer-empty-show-all' }, 'Show all layers');
+  all.addEventListener('click', () => applyLayers(new Set(C.LAYERS)));
+  box.append(el('p', {}, msg), all);
+}
+
+// ---- Show layers control ------------------------------------------------------
+function applyLayers(next) {
+  const sel = job.items.find(i => i.id === selectedId);
+  shownLayers = next;
+  if (sel && !isShown(sel)) {
+    selectedId = null;
+    toast(`${sel.id} deselected because its layer is now hidden`);
+  }
+  renderAll();
+}
+function setLayerShown(layer, on) {
+  const next = new Set(shownLayers);
+  if (on) next.add(layer); else next.delete(layer);
+  applyLayers(next);
+}
+function setLayersOpen(open) {
+  layersOpen = open;
+  renderLayers();
+}
+function renderLayers() {
+  const btn = $('#btn-layers');
+  const reset = $('#btn-layers-reset');
+  const panel = $('#layers-panel');
+  const hiddenN = job.items.length - C.visibleItems(job, shownLayers).length;
+  const label = C.visibilityLabel(shownLayers);
+  btn.textContent = `Layers: ${allShown() ? 'All' : shownLayers.size ? label : 'none shown'}`;
+  btn.title = `Show layers (now: ${label})`;
+  btn.setAttribute('aria-expanded', String(layersOpen));
+  btn.classList.toggle('filtered', !allShown());
+  reset.hidden = allShown();
+  reset.textContent = hiddenN ? `${hiddenN} hidden · Show all` : 'Show all';
+  panel.hidden = !layersOpen;
+  if (!layersOpen) return;
+  const active = document.activeElement;
+  const focusKey = active && panel.contains(active) ? active.dataset.key : null;
+  panel.innerHTML = '';
+  panel.appendChild(el('p', { class: 'layers-title' }, 'Show layers'));
+  const counts = C.layerCounts(job);
+  for (const l of C.LAYERS) {
+    const row = el('div', { class: 'layer-row' });
+    const lbl = el('label', { class: 'layer-check' });
+    const cb = el('input', { type: 'checkbox', 'data-key': `cb-${l}`, 'data-testid': `layer-${l}` });
+    cb.checked = shownLayers.has(l);
+    cb.addEventListener('change', () => setLayerShown(l, cb.checked));
+    lbl.append(cb, el('span', {}, `${C.LAYER_LABELS[l]} (${counts[l]})`));
+    const only = el('button', { class: 'layer-only', 'data-key': `only-${l}`, 'data-testid': `layer-only-${l}`, 'aria-label': `Show only ${C.LAYER_LABELS[l]}` }, 'Only');
+    only.addEventListener('click', () => applyLayers(new Set([l])));
+    row.append(lbl, only);
+    panel.appendChild(row);
+  }
+  const all = el('button', { class: 'layer-all', 'data-key': 'all', 'data-testid': 'layers-show-all' }, 'Show all');
+  all.disabled = allShown();
+  all.addEventListener('click', () => applyLayers(new Set(C.LAYERS)));
+  panel.appendChild(all);
+  panel.appendChild(el('p', { class: 'layers-note' }, 'Hiding a layer only changes the drawing. The quote, CSV and whole-job print still include every fitting. Sketches and notes are shared by all layers and always show.'));
+  const target = focusKey && panel.querySelector(`[data-key="${focusKey}"]`);
+  if (target && !target.disabled) target.focus({ preventScroll: true });
+  else if (focusKey) btn.focus({ preventScroll: true });
 }
 
 // ---- Tabs, quote bar, inspector ----------------------------------------------
@@ -347,22 +452,27 @@ function renderTabs() {
   const tabs = $('#view-tabs');
   tabs.innerHTML = '';
   if (!job) return;
-  const ceilN = job.items.filter(i => i.wall === C.CEILING).length;
+  // With a layer filter on, counts read "shown/total" so hidden fittings stay obvious.
+  const filtered = !allShown();
+  const count = (list) => {
+    const shown = list.filter(isShown).length;
+    return { text: filtered ? `${shown}/${list.length}` : String(list.length), title: filtered ? `${shown} of ${list.length} fittings shown` : '' };
+  };
+  const ceilItems = job.items.filter(i => i.wall === C.CEILING);
   const defs = ['PLAN', 'A', 'B', 'C', 'D'].map(v => {
     // wall tabs count fittings mounted on that wall only; downlights are
     // ceiling fittings (shown in plan and as projection ticks on wall views)
-    const n = v === 'PLAN'
-      ? job.items.length
-      : job.items.filter(i => i.wall === v).length;
-    return { v, label: v === 'PLAN' ? `Plan (${n})` : `Wall ${v} (${n})`, n };
+    const c = count(v === 'PLAN' ? job.items : job.items.filter(i => i.wall === v));
+    return { v, label: v === 'PLAN' ? `Plan (${c.text})` : `Wall ${v} (${c.text})`, title: c.title };
   });
-  if (ceilN) defs.push({ v: null, label: `Ceiling fittings: ${ceilN} (plan only)`, n: ceilN, info: true });
+  if (ceilItems.length) defs.push({ v: null, label: `Ceiling fittings: ${count(ceilItems).text} (plan only)`, info: true });
   for (const d of defs) {
     if (d.info) {
       tabs.appendChild(el('span', { class: 'tabs-info', style: 'align-self:center;font-size:13px;color:#555;padding:0 6px' }, d.label));
       continue;
     }
     const b = el('button', { 'data-view': d.v, 'data-testid': `tab-${d.v}`, class: view === d.v ? 'active' : '' }, d.label);
+    if (d.title) b.title = d.title;
     b.addEventListener('click', () => { view = d.v; renderAll(); });
     tabs.appendChild(b);
   }
@@ -400,6 +510,7 @@ function renderQuote() {
   const total = chip(bd.complete ? `Total ${C.formatPence(bd.totalPence)}` : `${C.formatPence(bd.totalPence)} so far`, 'q-total');
   if (!bd.complete) total.append(el('span', { class: 'q-long' }, ' — total incomplete'));
   sum.append(total);
+  if (!allShown()) sum.append(chip('Quote covers all layers', 'q-scope'));
   if (bd.existingQty) sum.append(chip(`${bd.existingQty} existing not counted`, 'q-existing'));
 }
 
@@ -409,6 +520,8 @@ function inspectorToggle() {
   const toggle = el('button', { id: 'btn-inspector-toggle', class: 'inspector-toggle', 'aria-expanded': String(!inspectorCollapsed) }, inspectorCollapsed ? 'Show details' : 'Hide details');
   toggle.addEventListener('click', () => {
     inspectorCollapsed = !inspectorCollapsed;
+    // phones share the screen between the two panels: expanding details closes Layers
+    if (!inspectorCollapsed && PHONE.matches) layersOpen = false;
     renderAll();
     $('#inspector').scrollTop = 0;
     // the panel is rebuilt, so hand focus to the new toggle
@@ -445,6 +558,10 @@ function inspectorRoomPanel() {
   const cnt = (t) => { const s = el('span', { class: 'q-chip' }, t); s.style.whiteSpace = 'nowrap'; return s; };
   counts.append(cnt(`${job.items.length} fittings`), cnt(`${pricedQty} priced`), cnt(`${bd.unpricedCount} ${bd.unpricedCount === 1 ? 'needs' : 'need'} a price`), cnt(`${bd.existingQty} existing not counted`));
   box.appendChild(counts);
+  const lc = C.layerCounts(job);
+  const layerLine = el('p', { class: 'count-line', 'data-testid': 'layer-counts' });
+  for (const l of C.LAYERS) layerLine.append(cnt(`${C.LAYER_LABELS[l]} ${lc[l]}${shownLayers.has(l) ? '' : ' (hidden)'}`));
+  box.append(el('label', {}, 'Fittings by layer'), layerLine);
   const ratesBtn = el('button', { 'data-testid': 'rates-open' }, 'Rates for this job');
   ratesBtn.addEventListener('click', openRates);
   box.appendChild(ratesBtn);
@@ -456,6 +573,7 @@ function inspectorRoomPanel() {
   }
   legend.appendChild(el('li', {}, 'F1, F2… are fitting numbers. The letters after the dot are the fitting type.'));
   legend.appendChild(el('li', {}, 'Dashed circles are ceiling fittings (plan view only)'));
+  legend.appendChild(el('li', {}, 'Use “Layers” above the drawing to show lighting, sockets & spurs or three-phase on their own or together.'));
   box.appendChild(legend);
 }
 
@@ -479,12 +597,26 @@ function renderInspector() {
   typeSel.value = item.type;
   label('Type');
   box.appendChild(typeSel);
-  typeSel.addEventListener('change', () => commit(() => {
-    item.type = typeSel.value;
-    if (item.wall === C.CEILING && typeSel.value !== 'downlight') item.wall = 'A';
-    if (typeSel.value === 'downlight') item.wall = C.CEILING;
-    C.clampItem(job, item);
-  }));
+  typeSel.addEventListener('change', () => {
+    let revealed = null;
+    commit(() => { C.setItemType(job, item.id, typeSel.value); revealed = revealLayerOf(item.id); });
+    if (revealed) toast(`${revealed} layer shown so ${item.id} stays visible`);
+  });
+
+  // Layer: automatic follows the type; an explicit choice is kept until the type changes.
+  const def = C.defaultLayerFor(item.type);
+  const layerSel = el('select', { 'data-testid': 'ins-layer' });
+  layerSel.appendChild(el('option', { value: '' }, `Automatic (${C.LAYER_LABELS[def]})`));
+  for (const l of C.LAYERS) if (l !== def) layerSel.appendChild(el('option', { value: l }, C.LAYER_LABELS[l]));
+  layerSel.value = C.isLayer(item.layer) && item.layer !== def ? item.layer : '';
+  label('Layer');
+  box.appendChild(layerSel);
+  box.appendChild(el('p', { class: 'field-note' }, 'The layer only changes what’s shown. The price follows the type. Changing the type sets this back to automatic.'));
+  layerSel.addEventListener('change', () => {
+    let revealed = null;
+    commit(() => { C.setItemLayer(job, item.id, layerSel.value || null); revealed = revealLayerOf(item.id); });
+    if (revealed) toast(`${revealed} layer shown so ${item.id} stays visible`);
+  });
 
   const wallSel = el('select', { 'data-testid': 'ins-wall' });
   if (item.type === 'downlight') {
@@ -533,7 +665,7 @@ function renderInspector() {
   ta.addEventListener('change', () => commit(() => { item.notes = ta.value.slice(0, C.LIMITS.maxTextLen); }));
 
   const price = el('p', { class: 'price-line', 'data-testid': 'price-line' });
-  if (item.type === 'existing') price.textContent = 'Existing — no work, not counted';
+  if (item.type === 'existing') price.textContent = 'Existing — no work, not counted on any layer';
   else if (item.type === 'unknown') price.textContent = 'Unknown — needs a price before quoting';
   else {
     const rate = C.rateFor(job, item.type);
@@ -557,7 +689,10 @@ function renderAll() {
   $('#btn-redo').disabled = !redoStack.length;
   $('#sample-chip').hidden = !job.sample;
   $('#btn-job-name').textContent = job.name;
-  renderTabs(); renderCanvas(); renderInspector(); renderQuote();
+  // A hidden fitting can't stay selected: it could be moved or deleted unseen.
+  const sel = job.items.find(i => i.id === selectedId);
+  if (!sel || !isShown(sel)) selectedId = null;
+  renderTabs(); renderLayers(); renderCanvas(); renderInspector(); renderQuote();
   syncFooterHeight();
 }
 
@@ -631,6 +766,7 @@ function askShrink(vals, outside) {
 function openRates() {
   const box = el('div');
   box.appendChild(el('p', {}, 'These rates are saved with this job. Changing them reprices this job only.'));
+  box.appendChild(el('p', { style: 'font-size:14px' }, 'Fused spur and three-phase point have no example rate. Add your own price, or leave them blank and they’ll show as needing a price.'));
   const inputs = {};
   for (const k of C.RATE_KEYS) {
     const row = el('div', { class: 'rate-input-row' });
@@ -696,6 +832,7 @@ function openBreakdown() {
   }
   box.appendChild(table);
   box.appendChild(el('p', {}, bd.complete ? `Total ${C.formatPence(bd.totalPence)}` : `Total so far ${C.formatPence(bd.totalPence)} — incomplete, ${bd.unpricedCount} type${bd.unpricedCount > 1 ? 's' : ''} unpriced`));
+  box.appendChild(el('p', { style: 'font-size:14px', 'data-testid': 'breakdown-scope' }, 'Whole job, all layers. Hiding layers on screen doesn’t change this.'));
   box.appendChild(el('p', { style: 'font-size:13px' }, 'Example labour rates only. Not a quotation or installation advice.'));
   modal('Labour breakdown', [box], [
     { label: 'Edit rates', testid: 'breakdown-edit-rates', fn: () => { closeModal(); openRates(); } },
@@ -730,19 +867,31 @@ function downloadBackup() {
 function downloadCsv() { download(`${jobSlug()}-labour.csv`, C.jobCsv(job), 'text/csv'); }
 
 // ---- Print pack -----------------------------------------------------------------
-function buildPrintPack(includeInk = true) {
+// layers: null prints the whole job (default). A Set of layer ids limits the
+// drawing pages and their fitting lists to those layers; the labour page always
+// covers the whole job. Either way the job itself is never copied or changed.
+function buildPrintPack(includeInk = true, layers = null) {
   const pack = $('#print-pack');
   pack.innerHTML = '';
+  const show = layers ? (it) => layers.has(C.layerOf(it)) : () => true;
+  const drawScope = layers ? `Drawings: ${C.visibilityLabel(layers)} only` : 'All layers';
+  const hiddenLayers = layers ? C.LAYERS.filter(l => !layers.has(l)).map(l => C.LAYER_LABELS[l]) : [];
+  const hiddenN = job.items.filter(it => !show(it)).length;
   const dims = roomMm();
   const dateStr = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
   const savedStr = job.savedAt ? `saved ${new Date(job.savedAt).toLocaleString('en-GB')}` : 'not yet saved';
-  const mkPage = () => {
+  const mkPage = (scope) => {
     const p = el('div', { class: 'page' });
     const h = el('div', { class: 'print-header' });
-    h.append(el('strong', {}, `${job.name} — prototype, example rates`), el('span', {}, `revision ${job.revision} · ${savedStr} · printed ${dateStr}`));
+    h.append(el('strong', {}, `${job.name} — prototype, example rates`), el('span', {}, `${scope} · revision ${job.revision} · ${savedStr} · printed ${dateStr}`));
     p.appendChild(h);
     pack.appendChild(p);
     return p;
+  };
+  const scopeNote = (page) => {
+    if (!layers) return;
+    page.appendChild(el('p', { class: 'print-scope' },
+      `These drawings show ${C.visibilityLabel(layers)} only. Not drawn: ${hiddenLayers.join(', ')} (${hiddenN} fitting${hiddenN === 1 ? '' : 's'}), still included in the labour breakdown. Sketches are shared by all layers.`));
   };
   const svgFor = (viewName) => {
     const svg = document.createElementNS(NS, 'svg');
@@ -753,14 +902,14 @@ function buildPrintPack(includeInk = true) {
       svg.setAttribute('viewBox', `-800 -800 ${vbW} ${vbH}`);
       if (!includeInk) job.annotations.PLAN.forEach(() => { });
       const saved = job.annotations.PLAN; if (!includeInk) job.annotations.PLAN = [];
-      renderPlan(tmpWorld, dims);
+      renderPlan(tmpWorld, dims, show);
       if (!includeInk) job.annotations.PLAN = saved;
     } else {
       const L = (viewName === 'A' || viewName === 'C') ? dims.W : dims.D;
       vbW = L + 1600; vbH = dims.H + 1600;
       svg.setAttribute('viewBox', `-800 -800 ${vbW} ${vbH}`);
       const saved = job.annotations[viewName]; if (!includeInk) job.annotations[viewName] = [];
-      renderWall(tmpWorld, viewName, dims, true);
+      renderWall(tmpWorld, viewName, dims, true, show);
       if (!includeInk) job.annotations[viewName] = saved;
     }
     while (tmpWorld.firstChild) svg.appendChild(tmpWorld.firstChild);
@@ -785,8 +934,9 @@ function buildPrintPack(includeInk = true) {
   };
 
   // Page 1: plan, legend, room, notes
-  const p1 = mkPage();
-  p1.appendChild(el('h2', {}, 'Floor plan'));
+  const p1 = mkPage(drawScope);
+  p1.appendChild(el('h2', {}, layers ? `Floor plan — ${C.visibilityLabel(layers)} only` : 'Floor plan — all layers'));
+  scopeNote(p1);
   p1.appendChild(svgFor('PLAN'));
   const legend = el('p', { style: 'font-size:9.5pt' });
   legend.textContent = Object.values(C.TYPES).map(t => `${t.symbol} = ${t.label}`).join(' · ') + ' · downlights shown dashed on the ceiling';
@@ -798,21 +948,22 @@ function buildPrintPack(includeInk = true) {
   // Pages 2–3: two walls per page
   let page = null;
   C.WALLS.forEach((w, idx) => {
-    if (idx % 2 === 0) page = mkPage();
-    page.appendChild(el('h2', {}, `Wall ${w}`));
+    if (idx % 2 === 0) { page = mkPage(drawScope); scopeNote(page); }
+    page.appendChild(el('h2', {}, layers ? `Wall ${w} — ${C.visibilityLabel(layers)} only` : `Wall ${w}`));
     page.appendChild(svgFor(w));
-    page.appendChild(itemTable(job.items.filter(i => i.wall === w)));
+    page.appendChild(itemTable(job.items.filter(i => i.wall === w && show(i))));
   });
   // ceiling items table appended to wall D page
-  const ceil = job.items.filter(i => i.wall === C.CEILING);
+  const ceil = job.items.filter(i => i.wall === C.CEILING && show(i));
   if (ceil.length) {
     page.appendChild(el('h2', {}, 'Ceiling fittings'));
     page.appendChild(itemTable(ceil, true));
   }
 
-  // Last page: labour breakdown
-  const pL = mkPage();
-  pL.appendChild(el('h2', {}, 'Labour breakdown'));
+  // Last page: labour breakdown, always the whole job
+  const pL = mkPage('Whole job, all layers');
+  pL.appendChild(el('h2', {}, 'Labour breakdown — whole job, all layers'));
+  if (layers) pL.appendChild(el('p', { class: 'print-scope' }, `This page covers every fitting on every layer, including the ${hiddenN} not drawn on the earlier pages.`));
   const bd = C.breakdown(job);
   const t = el('table');
   const head = el('tr');
@@ -847,19 +998,48 @@ function buildPrintPack(includeInk = true) {
 }
 
 function openPrint() {
-  modal('Print', [el('p', {}, 'Prints the plan, all four wall views with fittings, and the labour breakdown.')], [
+  const box = el('div');
+  box.appendChild(el('p', {}, 'Prints the plan, all four wall views with fittings, and the labour breakdown.'));
+  const choice = (value, text, checked, disabled) => {
+    const r = el('input', { type: 'radio', name: 'print-scope', value, 'data-testid': `print-scope-${value}` });
+    r.checked = checked; r.disabled = disabled;
+    const lbl = el('label', { class: 'print-choice' });
+    lbl.append(r, el('span', {}, text));
+    box.appendChild(lbl);
+    return r;
+  };
+  choice('all', 'Whole job — all layers', true, false);
+  const canFilter = !allShown() && shownLayers.size > 0;
+  const shownR = choice('shown',
+    canFilter
+      ? `Drawings: shown layers only (${C.visibilityLabel(shownLayers)})`
+      : 'Drawings: shown layers only (hide a layer first to use this)',
+    false, !canFilter);
+  box.appendChild(el('p', { style: 'font-size:14px' }, 'The labour breakdown always covers the whole job, all layers.'));
+  // Snapshot now so the printed pages match what was chosen here.
+  const chosen = new Set(shownLayers);
+  modal('Print', [box], [
     { label: 'Cancel', fn: closeModal },
     { label: 'Print', class: 'btn-primary', testid: 'print-go', fn: () => {
+      const layers = shownR.checked ? chosen : null;
       closeModal();
       // wait for the debounced save first, so the header shows a real saved
       // time (bounded: never blocks printing for more than 2 s)
       const t0 = Date.now();
-      const go = () => { buildPrintPack(true); setTimeout(() => window.print(), 50); };
+      const go = () => { printFromDialog = true; buildPrintPack(true, layers); setTimeout(() => window.print(), 50); };
       const tick = () => (job.savedAt || Date.now() - t0 > 2000) ? go() : setTimeout(tick, 100);
       tick();
     } },
   ]);
 }
+
+// Printing from the browser's own menu (not the Print dialog) always gets the
+// whole job, never a leftover shown-layers pack.
+let printFromDialog = false;
+window.addEventListener('beforeprint', () => {
+  if (!printFromDialog && job && job.room && job.room.widthM) buildPrintPack(true, null);
+});
+window.addEventListener('afterprint', () => { printFromDialog = false; });
 
 // ---- Menu / start flows -----------------------------------------------------------
 function openMenu() {
@@ -875,6 +1055,7 @@ function openMenu() {
     ['Import backup', () => { closeModal(); $('#file-input').click(); }],
     ['Download CSV', () => { closeModal(); downloadCsv(); }],
     ['Print', () => { closeModal(); openPrint(); }],
+    ['Try layers demo', () => { closeModal(); confirmLayersDemo(); }],
     ['About this prototype', () => { closeModal(); openAbout(); }],
   ];
   for (const [label, fn] of items) {
@@ -905,6 +1086,20 @@ function confirmNewJob() {
   ]);
 }
 
+function openLayersDemo() {
+  beginJob(C.layersDemoJob());
+  toast('Layers demo opened. It’s made up, and the fused spur and three-phase prices are blank on purpose.', 5000);
+}
+function confirmLayersDemo() {
+  modal('Try the layers demo', [
+    el('p', {}, 'Opens a made-up workshop with lighting, sockets & spurs and three-phase fittings. It replaces your current job on this device. Download a backup first?'),
+  ], [
+    { label: 'Cancel', fn: closeModal },
+    { label: 'Open without backup', testid: 'demo-nobackup', fn: () => { closeModal(); openLayersDemo(); } },
+    { label: 'Download and open', class: 'btn-primary', fn: () => { if (downloadBackup()) { closeModal(); openLayersDemo(); } } },
+  ]);
+}
+
 function showStart() {
   const saved = loadSaved();
   $('#start').hidden = false;
@@ -913,6 +1108,7 @@ function showStart() {
 }
 function beginJob(j) {
   job = C.normaliseJob(j); history = []; redoStack = []; selectedId = null; view = 'PLAN'; zoom = { s: 1, tx: 0, ty: 0 };
+  shownLayers = new Set(C.LAYERS); layersOpen = false;
   $('#start').hidden = true; $('#app').hidden = false;
   renderAll();
   if (!job.room.widthM) openRoomForm();
@@ -984,7 +1180,7 @@ function noteInput(e, outcome) {
 
 // Local-only drawing check shown in the Menu for support calls. Holds pointer
 // facts only, never job content, and is never sent anywhere.
-const BUILD_LABEL = 'iPad finger update 2';
+const BUILD_LABEL = 'Electrical layers update 1';
 let downCount = 0;
 let lastDown = { id: null };
 function startDiag(e) {
@@ -1101,6 +1297,7 @@ $('#canvas').addEventListener('pointerdown', (e) => {
   e.preventDefault();
   const canvas = $('#canvas');
   startDiag(e);
+  if (layersOpen) setLayersOpen(false);
   // A primary pointer means the browser has no other contact of this kind down,
   // so any we still track of that kind lost its pointerup. Forget it, or every
   // later single touch would start a pinch.
@@ -1212,11 +1409,12 @@ function placeAt(p) {
     height = C.TYPES[placeType].defaultHeightMm ?? 450;
   }
   fromLeft = Math.max(0, fromLeft);
-  let id;
-  commit(() => { id = C.placeItem(job, placeType, wall, fromLeft, height); });
+  let id, revealed = null;
+  // Placing onto a hidden layer shows that layer, so the new fitting never vanishes.
+  commit(() => { id = C.placeItem(job, placeType, wall, fromLeft, height); revealed = revealLayerOf(id); });
   if (!id) return; // commit failed (e.g. item cap); job untouched
   selectedId = id;
-  toast(`${id} placed on ${wall === C.CEILING ? 'ceiling' : 'Wall ' + wall}`);
+  toast(`${id} placed on ${wall === C.CEILING ? 'ceiling' : 'Wall ' + wall}${revealed ? ` · ${revealed} layer now shown` : ''}`);
   renderAll();
 }
 
@@ -1406,6 +1604,11 @@ $('#btn-zoom-fit').addEventListener('click', () => { zoom = { s: 1, tx: 0, ty: 0
 
 document.addEventListener('keydown', (e) => {
   const inField = e.target.matches('input, textarea, select');
+  if (e.key === 'Escape' && layersOpen && !$('#modal-root').firstChild) {
+    setLayersOpen(false);
+    $('#btn-layers').focus({ preventScroll: true });
+    return;
+  }
   if (e.key === 'Escape' && inField) {
     // In a dialog: close it (nothing typed there is kept without Save).
     // In the details panel: blur, which commits the field through its change handler.
@@ -1429,6 +1632,18 @@ document.addEventListener('keydown', (e) => {
 // ---- Start buttons -----------------------------------------------------------------
 $('#start-blank').addEventListener('click', () => beginJob(C.blankJob('Untitled room')));
 $('#start-sample').addEventListener('click', () => beginJob(C.sampleJob()));
+$('#start-layers-demo').addEventListener('click', openLayersDemo);
+// phones share the screen between the two panels: opening Layers collapses details
+$('#btn-layers').addEventListener('click', () => {
+  if (!layersOpen && PHONE.matches && !inspectorCollapsed) {
+    inspectorCollapsed = true;
+    layersOpen = true;
+    renderAll();
+    return;
+  }
+  setLayersOpen(!layersOpen);
+});
+$('#btn-layers-reset').addEventListener('click', () => applyLayers(new Set(C.LAYERS)));
 $('#start-continue').addEventListener('click', () => {
   const saved = loadSaved();
   if (saved) { beginJob(saved); history = []; renderAll(); }

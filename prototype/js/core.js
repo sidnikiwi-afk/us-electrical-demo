@@ -17,26 +17,41 @@ export const LIMITS = {
   historyLimit: 50,
 };
 
-// Fitting types. The first five are chargeable work types; the last two are excluded.
-export const TYPES = {
-  surface:    { label: 'New surface socket',    symbol: 'SS', defaultHeightMm: 450,  chargeable: true },
-  recessed:   { label: 'New recessed socket',   symbol: 'RS', defaultHeightMm: 450,  chargeable: true },
-  replacement:{ label: 'Replacement socket',    symbol: 'RP', defaultHeightMm: 450,  chargeable: true },
-  switch:     { label: 'Switch',                symbol: 'SW', defaultHeightMm: 1200, chargeable: true },
-  downlight:  { label: 'Downlight',             symbol: 'DL', defaultHeightMm: null, chargeable: true }, // ceiling
-  existing:   { label: 'Existing – no work',    symbol: 'EX', defaultHeightMm: 450,  chargeable: false },
-  unknown:    { label: 'Unknown – unpriced',    symbol: '?',  defaultHeightMm: 450,  chargeable: false },
+// Layers group fittings for showing and hiding only. A layer never changes
+// pricing, and 'other' keeps existing/unknown fittings until the user assigns them.
+export const LAYERS = ['lighting', 'power', 'threephase', 'other'];
+export const LAYER_LABELS = {
+  lighting: 'Lighting',
+  power: 'Sockets & spurs',
+  threephase: 'Three-phase',
+  other: 'Other / unassigned',
 };
 
-export const RATE_KEYS = ['surface', 'recessed', 'replacement', 'switch', 'downlight'];
+// Fitting types. All but the last two are chargeable work types; existing and
+// unknown are excluded. `layer` is each type's default layer. Default heights
+// are editable sample placement values, not installation advice.
+export const TYPES = {
+  surface:    { label: 'New surface socket',    symbol: 'SS', defaultHeightMm: 450,  chargeable: true,  layer: 'power' },
+  recessed:   { label: 'New recessed socket',   symbol: 'RS', defaultHeightMm: 450,  chargeable: true,  layer: 'power' },
+  replacement:{ label: 'Replacement socket',    symbol: 'RP', defaultHeightMm: 450,  chargeable: true,  layer: 'power' },
+  switch:     { label: 'Switch',                symbol: 'SW', defaultHeightMm: 1200, chargeable: true,  layer: 'lighting' },
+  downlight:  { label: 'Downlight',             symbol: 'DL', defaultHeightMm: null, chargeable: true,  layer: 'lighting' }, // ceiling
+  spur:       { label: 'Fused spur',            symbol: 'FS', defaultHeightMm: 450,  chargeable: true,  layer: 'power' },
+  threephase: { label: 'Three-phase point',     symbol: '3P', defaultHeightMm: 1200, chargeable: true,  layer: 'threephase' },
+  existing:   { label: 'Existing – no work',    symbol: 'EX', defaultHeightMm: 450,  chargeable: false, layer: 'other' },
+  unknown:    { label: 'Unknown – unpriced',    symbol: '?',  defaultHeightMm: 450,  chargeable: false, layer: 'other' },
+};
+
+export const RATE_KEYS = ['surface', 'recessed', 'replacement', 'switch', 'downlight', 'spur', 'threephase'];
 export const WALLS = ['A', 'B', 'C', 'D'];
 export const VIEWS = ['PLAN', 'A', 'B', 'C', 'D']; // annotation views
 
 export const CEILING = 'CEIL';
 
 export function defaultRates() {
-  // Example rates only, integer pence. replacement left unpriced in sample only.
-  return { surface: 3500, recessed: 5500, replacement: 1500, switch: 2500, downlight: 3000 };
+  // Example rates only, integer pence. Fused spur and three-phase point have
+  // no example rate: they stay unpriced until the user enters one.
+  return { surface: 3500, recessed: 5500, replacement: 1500, switch: 2500, downlight: 3000, spur: null, threephase: null };
 }
 
 export function blankJob(name = 'Untitled room') {
@@ -49,7 +64,7 @@ export function blankJob(name = 'Untitled room') {
     revision: 1,
     room: { widthM: null, depthM: null, heightM: null }, // null = not entered yet
     nextId: 1,
-    items: [],       // {id, type, wall, fromLeftMm, heightMm, notes}
+    items: [],       // {id, type, wall, fromLeftMm, heightMm, notes, layer?} — layer only when it differs from the type default
     rates: defaultRates(),
     jobNotes: '',
     annotations: { PLAN: [], A: [], B: [], C: [], D: [] }, // strokes: {points:[[x,y],...]}
@@ -132,6 +147,73 @@ export function moveOutsideItemsToEdge(job, widthM, depthM, heightM) {
   });
 }
 
+// ---- Layers --------------------------------------------------------------
+
+export function isLayer(v) {
+  return typeof v === 'string' && LAYERS.includes(v);
+}
+
+export function defaultLayerFor(type) {
+  return TYPES[type]?.layer ?? 'other';
+}
+
+export function layerOf(item) {
+  return isLayer(item?.layer) ? item.layer : defaultLayerFor(item?.type);
+}
+
+// null, undefined or '' goes back to the type default. Only a layer that
+// differs from the default is stored, so a plain fitting has no layer key.
+export function setItemLayer(job, id, layer) {
+  const it = job.items.find(i => i.id === id);
+  if (!it) throw new Error(`no fitting "${id}"`);
+  if (layer === null || layer === undefined || layer === '') { delete it.layer; return layerOf(it); }
+  if (!isLayer(layer)) throw new Error(`unknown layer "${String(layer).slice(0, 40)}"`);
+  if (layer === defaultLayerFor(it.type)) delete it.layer;
+  else it.layer = layer;
+  return layerOf(it);
+}
+
+// Changing type always drops an explicit layer: the fitting takes the new
+// type's default. Downlights move to the ceiling; anything else leaving the
+// ceiling goes to Wall A. Position is then kept inside the room.
+export function setItemType(job, id, type) {
+  if (!TYPES[type]) throw new Error(`unknown fitting type "${type}"`);
+  const it = job.items.find(i => i.id === id);
+  if (!it) throw new Error(`no fitting "${id}"`);
+  it.type = type;
+  delete it.layer;
+  if (type === 'downlight') it.wall = CEILING;
+  else if (it.wall === CEILING) it.wall = 'A';
+  clampItem(job, it);
+  return it;
+}
+
+// Visibility is view state (a list or Set of layer ids), never stored in the
+// job. null/undefined means all layers; unknown names are ignored.
+export function normaliseVisibility(visible) {
+  if (visible === null || visible === undefined) return [...LAYERS];
+  const s = new Set(visible);
+  return LAYERS.filter(l => s.has(l));
+}
+
+export function visibleItems(job, visible) {
+  const s = new Set(normaliseVisibility(visible));
+  return job.items.filter(it => s.has(layerOf(it)));
+}
+
+export function layerCounts(job, items = job.items) {
+  const counts = Object.fromEntries(LAYERS.map(l => [l, 0]));
+  for (const it of items) counts[layerOf(it)] += 1;
+  return counts;
+}
+
+export function visibilityLabel(visible) {
+  const v = normaliseVisibility(visible);
+  if (v.length === LAYERS.length) return 'All layers';
+  if (!v.length) return 'No layers';
+  return v.map(l => LAYER_LABELS[l]).join(' + ');
+}
+
 // ---- Pricing -----------------------------------------------------------
 
 export function rateFor(job, type) {
@@ -212,6 +294,10 @@ export function validateJob(job) {
       if (!Number.isInteger(it.fromLeftMm) || it.fromLeftMm < 0) errs.push(`${w}.fromLeftMm: invalid`);
       if (!Number.isInteger(it.heightMm) || it.heightMm < 0) errs.push(`${w}.heightMm: invalid`);
       if (typeof it.notes !== 'string' || it.notes.length > LIMITS.maxTextLen) errs.push(`${w}.notes: invalid`);
+      // absent or null = type default; anything else must be a known layer
+      if (it.layer !== undefined && it.layer !== null && !isLayer(it.layer)) {
+        errs.push(`${w}.layer: unknown "${String(it.layer).slice(0, 40)}"`);
+      }
       if (wallOk && TYPES[it.type] && Number.isInteger(it.fromLeftMm) && Number.isInteger(it.heightMm)
         && isFiniteNum(job.room?.widthM) && isFiniteNum(job.room?.depthM) && isFiniteNum(job.room?.heightM)) {
         const trial = { room: job.room };
@@ -274,9 +360,22 @@ export function serialiseJob(job) {
 
 export function normaliseJob(job) {
   // Fill any missing annotation view and notePins so renders and Draw never
-  // hit undefined arrays. Returns a shallow-copied job; never mutates input.
+  // hit undefined arrays. Older backups lack the newer rate keys: those become
+  // null (unpriced), never a guessed price. A null item layer is dropped so the
+  // fitting uses its type default. Returns a shallow-copied job; never mutates input.
   const out = { ...job, annotations: { ...(job.annotations ?? {}) }, notePins: Array.isArray(job.notePins) ? job.notePins : [] };
   for (const v of VIEWS) if (!Array.isArray(out.annotations[v])) out.annotations[v] = [];
+  if (job.rates && typeof job.rates === 'object') {
+    out.rates = { ...job.rates };
+    for (const k of RATE_KEYS) if (out.rates[k] === undefined) out.rates[k] = null;
+  }
+  if (Array.isArray(job.items)) {
+    out.items = job.items.map(it => {
+      if (!it || it.layer !== null) return it;
+      const { layer, ...rest } = it;
+      return rest;
+    });
+  }
   return out;
 }
 
@@ -337,6 +436,7 @@ export function jobCsv(job) {
   }
   lines.push('');
   lines.push([csvCell(bd.complete ? `Total ${formatPence(bd.totalPence)}` : `Total so far ${formatPence(bd.totalPence)} – incomplete, ${bd.unpricedCount} unpriced`)].join(','));
+  lines.push([csvCell('Whole job, all layers. Hiding layers on screen never changes this file.')].join(','));
   return lines.join('\r\n') + '\r\n';
 }
 
@@ -362,5 +462,34 @@ export function sampleJob() {
   placeItem(j, 'existing', 'D', 1500, 450, 'Keep as is');
   placeItem(j, 'unknown', 'C', 1200, 1800, 'Old isolator? – needs pricing');
   j.jobNotes = 'Made-up example job for review — not a real customer.';
+  return j;
+}
+
+export function layersDemoJob() {
+  // Synthetic workshop, 7.00 × 5.00 × 3.00 m, covering lighting, sockets &
+  // spurs and three-phase. Fused spur and three-phase point rates are left
+  // blank on purpose so the quote shows them as needing a price. Positions are
+  // made-up sample placements, not a design.
+  const j = blankJob('Workshop – layers demo (made-up)');
+  j.sample = true;
+  j.room = { widthM: 7.0, depthM: 5.0, heightM: 3.0 };
+  j.rates = defaultRates();
+  placeItem(j, 'switch', 'A', 400, 1200, 'By door');
+  placeItem(j, 'switch', 'C', 6500, 1200, 'Second door');
+  placeItem(j, 'downlight', CEILING, 1800, 1500, '');
+  placeItem(j, 'downlight', CEILING, 5200, 1500, '');
+  placeItem(j, 'downlight', CEILING, 1800, 3500, '');
+  placeItem(j, 'downlight', CEILING, 5200, 3500, '');
+  placeItem(j, 'surface', 'A', 2000, 450, 'Bench');
+  placeItem(j, 'surface', 'A', 4500, 450, 'Bench');
+  placeItem(j, 'recessed', 'D', 2500, 450, '');
+  placeItem(j, 'spur', 'B', 800, 450, 'Sample spur – price not set');
+  placeItem(j, 'spur', 'C', 2000, 1100, 'Sample spur – price not set');
+  placeItem(j, 'threephase', 'B', 2500, 1200, 'Sample machine point – price not set');
+  placeItem(j, 'threephase', 'D', 1000, 1200, 'Sample machine point – price not set');
+  const kept = placeItem(j, 'existing', 'C', 4500, 450, 'Existing socket kept – shown with sockets');
+  setItemLayer(j, kept, 'power');
+  placeItem(j, 'unknown', 'D', 4200, 1800, 'Old box – needs checking');
+  j.jobNotes = 'Made-up layers demo, not a real customer. Fused spur and three-phase point have no example rate, so the total is incomplete until you add your own in Rates.';
   return j;
 }

@@ -69,7 +69,7 @@ refresh before the new layout appears; saved jobs stay in the same browser.
 
 The Draw tool accepts wider finger contacts when no pen is active, and Clear
 sketches keeps the current tool selected. Menu includes a local Drawing check
-with build “iPad finger update 2” and the last input result. It contains no job
+with build “Electrical layers update 1” and the last input result. It contains no job
 content and sends nothing to a server. Browser-injected touch checks supplement
 the earlier synthetic-event tests; actual iPad confirmation is still needed.
 
@@ -86,3 +86,13 @@ Not complete / known limits: no real iPad or Surface hardware testing (simulated
 and touch only), no multi-room jobs, no cloud sync (by design); the print pack
 fits four A4 sheets (verified via `pdftoppm` renders) but its legibility on
 physical paper has not been reviewed by a human.
+
+## Electrical layers
+
+Use **Try layers demo** for a separate made-up workshop covering lighting, sockets and fused spurs, and three-phase points. The original barber-shop sample remains 12 fittings and £310 so far. The two new work types have no default labour price.
+
+**Layers** controls the floor plan and all four wall views. Show one group, any combination, or all. Other / unassigned holds existing or unknown fittings until you assign them. Sketches and notes are shared by all layers. Hiding a fitting does not remove it from the job or change its price. The quantities, labour total and CSV always cover the whole job.
+
+Each fitting can have one layer. Its work type supplies the default; changing work type resets the layer to that default. A custom layer is saved with the fitting. View filters reset to All when a job opens. Old backups load without editing; missing new price fields become unpriced. Backups containing the new fitting types cannot be opened in older versions of the app.
+
+Print defaults to all layers. The optional shown-layers print filters only the drawing pages and labels their scope. The labour page always includes the whole job. The browser’s own Print command produces the all-layer pack.

@@ -48,6 +48,12 @@
       <div id="canvas-wrap">
         <svg id="canvas" data-testid="canvas" touch-action="none"></svg>
         <div id="hint" data-testid="hint"></div>
+        <div id="layers-control">
+          <button id="btn-layers" data-testid="layers-button" aria-expanded="false" aria-controls="layers-panel">Layers: All</button>
+          <button id="btn-layers-reset" data-testid="layers-reset" hidden>Show all</button>
+          <div id="layers-panel" data-testid="layers-panel" role="group" aria-label="Show layers" hidden></div>
+        </div>
+        <div id="layer-empty" data-testid="layer-empty" role="status" hidden></div>
         <div id="zoom-controls">
           <button id="btn-zoom-out" title="Zoom out">−</button>
           <button id="btn-zoom-fit" title="Fit to view">Fit</button>
@@ -77,6 +83,7 @@
     <p class="banner">Tested with simulated pen and touch. Not yet tried on a real Surface, and palm rejection is unverified.</p>
     <button id="start-blank" data-testid="start-blank">Start a blank room</button>
     <button id="start-sample" data-testid="start-sample">Open barber-shop sample</button>
+    <button id="start-layers-demo" data-testid="start-layers-demo">Try layers demo (made-up workshop)</button>
     <button id="start-continue" data-testid="start-continue" hidden>Carry on with current job</button>
     <button id="start-import">Import a backup</button>
   </div>

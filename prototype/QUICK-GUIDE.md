@@ -1,4 +1,4 @@
-# What to try when the prototype is ready
+# A quick guide to the prototype
 
 This is a practice tool with an invented barber shop and example labour prices. It is for testing the idea, not quoting a real job yet.
 
@@ -19,6 +19,20 @@ The prototype keeps one current job in this browser. Download backups for safeke
 
 If the old Details button remains after an update, refresh once more. Keep using the same browser and address so your saved job stays available.
 
-If finger drawing still does not work, select Draw and try one line, then open Menu. The Drawing check at the bottom shows the version and what happened to your touch. It stays on your device. The latest version says “iPad finger update 2”.
+If finger drawing still does not work, select Draw and try one line, then open Menu. The Drawing check at the bottom shows the version and what happened to your touch. It stays on your device. The latest version says “Electrical layers update 1”.
 
 After typing a position or note, press Enter or tap another control before closing or reloading. An edit still in its field may not have been saved yet.
+
+## Show different parts of the job
+
+Choose **Try layers demo** for a made-up workshop with lights, sockets, fused spurs and three-phase points.
+
+Tap **Layers** above the drawing. Choose Lighting, Sockets & spurs, Three-phase, or a mix. **Other / unassigned** keeps fittings that still need checking visible. **Show all** brings everything back. This works on the floor plan and all four walls.
+
+Hiding a layer only hides it in the drawing. The fittings are still in the job, and the labour total still includes the whole job. Each fitting is counted once.
+
+Select a fitting to change its layer. Changing its work type puts it in that type’s usual layer. Fused spurs and three-phase points start with no price: add your labour rate under **Rates for this job** when you have one.
+
+Print defaults to all layers. You can instead print the layers currently shown; the drawing pages say which ones are included. The labour breakdown always covers the whole job. A backup saves the fittings and their layers. Reopening a job shows all layers again.
+
+On small screens, you can scroll inside the Layers list. If the details panel covers the drawing controls, tap **Hide details** first. On phones, opening Layers closes details; opening details closes Layers.
