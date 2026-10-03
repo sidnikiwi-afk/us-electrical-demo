@@ -49,7 +49,9 @@ The service worker caches the app for offline use after the first online visit.
 
 ## Checks
 
-The current version passed 20 data tests and 28 browser journeys.
+The current version passed 57 data tests, 28 browser journeys, 66 focused layers
+checks, 131 Set-height-for-several browser checks and an 11-point offline cache
+upgrade check.
 This download contains the runnable app and guide; development test tools and
 internal review records are kept separately. The print pack fits four A4 sheets:
 plan, walls A+B, walls C+D, and labour breakdown.
@@ -69,7 +71,7 @@ refresh before the new layout appears; saved jobs stay in the same browser.
 
 The Draw tool accepts wider finger contacts when no pen is active, and Clear
 sketches keeps the current tool selected. Menu includes a local Drawing check
-with build “Electrical layers update 1” and the last input result. It contains no job
+with build “Electrical layers update 2” and the last input result. It contains no job
 content and sends nothing to a server. Browser-injected touch checks supplement
 the earlier synthetic-event tests; actual iPad confirmation is still needed.
 
@@ -96,3 +98,9 @@ Use **Try layers demo** for a separate made-up workshop covering lighting, socke
 Each fitting can have one layer. Its work type supplies the default; changing work type resets the layer to that default. A custom layer is saved with the fitting. View filters reset to All when a job opens. Old backups load without editing; missing new price fields become unpriced. Backups containing the new fitting types cannot be opened in older versions of the app.
 
 Print defaults to all layers. The optional shown-layers print filters only the drawing pages and labels their scope. The labour page always includes the whole job. The browser’s own Print command produces the all-layer pack.
+
+## Set height for several
+
+The Select tool has a “Set height for several” mode (button in the Room details and under a wall fitting's height field). Tap fittings on the drawing to add or remove them — on any wall — type one height in millimetres and press Apply. One Apply is one undo step, and one Undo restores every fitting it changed.
+
+Safety rules: a ceiling fitting's stored value is a plan position, not a height, so ceiling fittings can never be added (a toast says so, and the core function refuses them too). The raw typed value is range-checked (0 to the room's ceiling height) before rounding to the nearest millimetre; there is no silent clamping. Fittings on hidden layers are removed from the list when the layer is hidden, and IDs that no longer exist or have moved to the ceiling are dropped with a toast; Apply re-checks every ID and changes nothing if any is stale. Only `heightMm` changes — IDs, counts, positions along walls, types, layers, rates and the price breakdown are untouched. Applying a height every selected fitting already has adds no undo step. Cancel, Escape or switching tools leaves the job unchanged. A tap only toggles when the pointer moved less than 12 px, so panning and pinching never change the selection, and a cancelled touch never toggles. The typed value is kept while you tap more fittings.

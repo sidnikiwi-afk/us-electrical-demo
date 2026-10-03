@@ -188,6 +188,44 @@ export function setItemType(job, id, type) {
   return it;
 }
 
+// Wall fittings only: a ceiling fitting's heightMm is a plan position, not a
+// height. Checks everything before changing anything, so a throw leaves the
+// job untouched. The raw value is range-checked BEFORE rounding, so rounding
+// can never carry an out-of-range input inside the limit.
+export function setWallHeights(job, ids, heightMm) {
+  const max = ceilingHeightMm(job.room);
+  if (!max) throw new Error('set the room size first');
+  if (typeof heightMm !== 'number' || !Number.isFinite(heightMm)) throw new Error('enter a height in mm');
+  if (heightMm < 0 || heightMm > max) throw new Error(`height must be 0–${max} mm`);
+  const h = Math.round(heightMm);
+  const unique = [...new Set(ids)];
+  if (!unique.length) throw new Error('no fittings selected');
+  const items = unique.map(id => {
+    const it = job.items.find(i => i.id === id);
+    if (!it) throw new Error(`no fitting "${id}"`);
+    if (!TYPES[it.type]) throw new Error(`unknown fitting type "${it.type}"`);
+    if (it.wall === CEILING) throw new Error(`${id} is a ceiling fitting`);
+    return it;
+  });
+  let changed = 0;
+  for (const it of items) if (it.heightMm !== h) { it.heightMm = h; changed += 1; }
+  return { heightMm: h, count: items.length, changed };
+}
+
+// [{heightMm, count}] in ascending height, for the "current heights" summary.
+// Ceiling, missing or unknown-type IDs are skipped, never counted.
+export function heightGroups(job, ids) {
+  const groups = new Map();
+  for (const id of new Set(ids)) {
+    const it = job.items.find(i => i.id === id);
+    if (!it || !TYPES[it.type] || it.wall === CEILING) continue;
+    groups.set(it.heightMm, (groups.get(it.heightMm) ?? 0) + 1);
+  }
+  return [...groups.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([heightMm, count]) => ({ heightMm, count }));
+}
+
 // Visibility is view state (a list or Set of layer ids), never stored in the
 // job. null/undefined means all layers; unknown names are ignored.
 export function normaliseVisibility(visible) {

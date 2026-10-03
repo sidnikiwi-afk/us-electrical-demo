@@ -286,3 +286,30 @@ button:disabled { opacity: .4; cursor: default; }
   #layers-control:has(#layers-panel:not([hidden])) #btn-layers-reset { display: none; }
   #canvas-wrap #layers-panel { max-height: calc(100cqh - 64px); }
 }
+
+/* Set height for several: removable fitting rows, at least 44px tall with
+   48px remove buttons, matching the touch sizes used elsewhere. */
+.multi-list { margin: 6px 0; }
+.multi-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 44px; border-bottom: 1px solid #e0e4ea; padding: 2px 0; }
+.multi-row:last-child { border-bottom: 0; }
+.multi-row-label { font-size: 14px; overflow-wrap: anywhere; }
+.multi-row button { min-height: 48px; min-width: 48px; padding: 4px 12px; font-size: 14px; flex: 0 0 auto; }
+
+/* Set height for several, review fix 1: the count is its own chip in the panel
+   header. It never shrinks or ellipsizes, so "3 selected" stays readable on the
+   collapsed phone sheet in portrait and landscape. */
+.multi-count { flex: 0 0 auto; white-space: nowrap; font-size: 14px; font-weight: 700; background: #eef2f8; border-radius: 10px; padding: 2px 8px; }
+
+/* Review fix 2, tablet/desktop only: the multi header row wraps instead of
+   pushing the header Cancel past the drawer edge. The heading takes only the
+   space its text needs, so it no longer squeezes onto three lines; Hide
+   details and Cancel fold to a second row when the first is full. Phones keep
+   the single row: the count chip must stay beside Cancel in the sheet bar. */
+@media (min-width: 601px) and (min-height: 501px) {
+  .inspector-head.multi-head { flex-wrap: wrap; }
+  .inspector-head.multi-head h2 { flex: 0 1 auto; }
+}
+
+/* Review fix 1b: at least 8px between Apply and Cancel so they can't be
+   mis-tapped as one target. */
+.multi-apply { margin-right: 8px; }

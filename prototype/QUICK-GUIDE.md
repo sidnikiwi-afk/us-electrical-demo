@@ -19,7 +19,17 @@ The prototype keeps one current job in this browser. Download backups for safeke
 
 If the old Details button remains after an update, refresh once more. Keep using the same browser and address so your saved job stays available.
 
-If finger drawing still does not work, select Draw and try one line, then open Menu. The Drawing check at the bottom shows the version and what happened to your touch. It stays on your device. The latest version says “Electrical layers update 1”.
+If finger drawing still does not work, select Draw and try one line, then open Menu. The Drawing check at the bottom shows the version and what happened to your touch. It stays on your device. The latest version says “Electrical layers update 2”.
+
+## Give several fittings the same height
+
+To give several fittings the same height, tap **Set height for several** (in the Room details, or under a fitting's height field), tap each fitting, enter the height in mm and tap Apply. One Undo reverses it. Ceiling fittings aren't included.
+
+- Tap a fitting again to take it off the list. Tapping empty space only moves the drawing; it never clears your list.
+- You can pick fittings on different walls. Each row shows the fitting, its wall and its current height.
+- Only the height changes. Position along the wall, work type, layer and price stay the same.
+- If the box is blank or the height is above the room's ceiling, you get a message and nothing changes until you enter a valid height. Applying a height every chosen fitting already has does nothing and adds no Undo step.
+- Cancel, Escape or choosing another tool leaves the list without changing anything. Hiding a layer removes its fittings from the list and tells you.
 
 After typing a position or note, press Enter or tap another control before closing or reloading. An edit still in its field may not have been saved yet.
 

@@ -10,6 +10,12 @@ let job = null;
 let mode = 'select';            // select | place | draw | notes
 let view = 'PLAN';              // PLAN | A | B | C | D
 let selectedId = null;
+// "Set height for several" sub-state of the Select tool: multiIds is null when
+// off and an array of fitting IDs when on. multiDraft keeps the typed height
+// across panel rebuilds; multiPending holds a tap awaiting the 12-px threshold.
+let multiIds = null;
+let multiDraft = '';
+let multiPending = null;
 let placeType = 'surface';
 let history = [];               // JSON snapshots (undo), limit 50
 let redoStack = [];
@@ -31,6 +37,40 @@ function revealLayerOf(id) {
   if (!it || isShown(it)) return null;
   shownLayers.add(C.layerOf(it));
   return C.LAYER_LABELS[C.layerOf(it)];
+}
+
+// ---- Set height for several -------------------------------------------------
+function endMulti() { multiIds = null; multiDraft = ''; multiPending = null; }
+function startMulti(initialId = null) {
+  multiIds = initialId ? [initialId] : [];
+  multiDraft = '';
+  multiPending = null;
+  selectedId = null;      // single selection is meaningless in multi mode
+  layersOpen = false;
+  // phones collapse so the drawing can be tapped (the count chip stays in the
+  // sheet header); tablets and desktops must stay expanded for Apply/Cancel
+  inspectorCollapsed = PHONE.matches;
+  setMode('select');
+  renderAll();
+}
+// A hidden, deleted, ceiling-moved or otherwise stale ID can't stay selected.
+// Called at the top of renderAll so every rerender drops them safely.
+function pruneMulti() {
+  if (!multiIds) return;
+  const kept = [], hiddenIds = [], staleIds = [];
+  for (const id of multiIds) {
+    const it = job.items.find(i => i.id === id);
+    if (!it || !C.TYPES[it.type] || it.wall === C.CEILING) staleIds.push(id);
+    else if (!isShown(it)) hiddenIds.push(id);
+    else kept.push(id);
+  }
+  if (hiddenIds.length || staleIds.length) {
+    multiIds = kept;
+    const msgs = [];
+    if (hiddenIds.length) msgs.push(`${hiddenIds.length} removed from the selection because their layer is now hidden`);
+    if (staleIds.length) msgs.push(`${staleIds.join(', ')} removed from the selection because they changed or are no longer in the job`);
+    toast(msgs.join(' · '));
+  }
 }
 
 const $ = (sel) => document.querySelector(sel);
@@ -352,12 +392,17 @@ function renderCanvas() {
     const lb = svgEl('text', { x: 0, y: 340, 'font-size': 150, 'text-anchor': 'middle', fill: '#444' }, g);
     lb.textContent = p.text.slice(0, 40);
   }
-  if (selectedId) {
+  if (multiIds) {
+    for (const id of multiIds) {
+      const sel = svg.querySelector(`.fitting[data-id="${id}"]`);
+      if (sel) { const r = svgEl('rect', { x: -180, y: -180, width: 360, height: 360, fill: 'none', stroke: '#2266cc', 'stroke-width': 40 }); sel.insertBefore(r, sel.firstChild); }
+    }
+  } else if (selectedId) {
     const sel = svg.querySelector(`.fitting[data-id="${selectedId}"]`);
     if (sel) { const r = svgEl('rect', { x: -180, y: -180, width: 360, height: 360, fill: 'none', stroke: '#2266cc', 'stroke-width': 40 }); sel.insertBefore(r, sel.firstChild); }
   }
   const placeLayerHidden = !shownLayers.has(C.defaultLayerFor(placeType));
-  $('#hint').textContent = {
+  $('#hint').textContent = multiIds ? 'Tap fittings to add or remove them, then enter one height.' : {
     select: 'Tap a fitting to select it. Drag to move.',
     place: C.TYPES[placeType].label + (placeType === 'downlight' ? ' — tap the ceiling in the plan view.' : ' — tap on the wall where the fitting goes.')
       + (placeLayerHidden ? ` Its layer (${C.LAYER_LABELS[C.defaultLayerFor(placeType)]}) is hidden and will be shown when you place it.` : ''),
@@ -519,6 +564,12 @@ function renderQuote() {
 function inspectorToggle() {
   const toggle = el('button', { id: 'btn-inspector-toggle', class: 'inspector-toggle', 'aria-expanded': String(!inspectorCollapsed) }, inspectorCollapsed ? 'Show details' : 'Hide details');
   toggle.addEventListener('click', () => {
+    // "Set height for several": the collapsed tablet/desktop strip hides the
+    // heading and clips the controls, so keep the drawer open while choosing.
+    if (!inspectorCollapsed && multiIds && !PHONE.matches) {
+      toast('Details stay open while setting several heights — Cancel or Apply first.');
+      return;
+    }
     inspectorCollapsed = !inspectorCollapsed;
     // phones share the screen between the two panels: expanding details closes Layers
     if (!inspectorCollapsed && PHONE.matches) layersOpen = false;
@@ -547,6 +598,9 @@ function inspectorRoomPanel() {
   const sizeBtn = el('button', { 'data-testid': 'room-size', class: 'btn-primary' }, 'Room size');
   sizeBtn.addEventListener('click', openRoomForm);
   box.appendChild(sizeBtn);
+  const multiBtn = el('button', { 'data-testid': 'multi-start-room' }, 'Set height for several');
+  multiBtn.addEventListener('click', () => startMulti());
+  box.appendChild(multiBtn);
   box.appendChild(el('label', {}, 'Job notes'));
   const ta = el('textarea', { 'data-testid': 'job-notes' });
   ta.value = job.jobNotes;
@@ -577,8 +631,100 @@ function inspectorRoomPanel() {
   box.appendChild(legend);
 }
 
+// "Set height for several" panel: count, removable rows, current-height summary,
+// one height field (kept in multiDraft across rebuilds), Apply and Cancel.
+function inspectorMultiPanel() {
+  const box = $('#inspector');
+  box.innerHTML = '';
+  const n = multiIds.length;
+  const toggle = inspectorToggle();
+  const headCancel = el('button', { class: 'inspector-toggle', 'data-testid': 'multi-cancel-head' }, 'Cancel');
+  headCancel.addEventListener('click', () => { endMulti(); renderAll(); });
+  const head = el('div', { class: 'inspector-head multi-head' });
+  const countChip = el('span', { class: 'multi-count', 'data-testid': 'multi-count' }, n ? `${n} selected` : 'none selected');
+  head.append(el('h2', { 'data-testid': 'multi-title' }, 'Set one height'), countChip, toggle, headCancel);
+  box.appendChild(head);
+  if (inspectorCollapsed) return; // phone sheet: the count and Cancel stay visible in the header
+
+  box.appendChild(el('p', { class: 'field-note' }, 'Tap fittings on the drawing to add or remove them. Ceiling fittings can’t be added.'));
+
+  const list = el('div', { class: 'multi-list', 'data-testid': 'multi-list' });
+  for (const id of multiIds) {
+    const it = job.items.find(i => i.id === id);
+    const sym = it && C.TYPES[it.type] ? C.TYPES[it.type].symbol : '?';
+    const wall = it && it.wall !== C.CEILING ? `Wall ${it.wall}` : '—';
+    const h = it ? it.heightMm : '?';
+    const row = el('div', { class: 'multi-row' });
+    row.appendChild(el('span', { class: 'multi-row-label' }, `${id} · ${sym} · ${wall} · ${h} mm`));
+    const rm = el('button', { 'aria-label': `Remove ${id} from selection`, 'data-testid': `multi-remove-${id}` }, 'Remove');
+    rm.addEventListener('click', () => { multiIds = multiIds.filter(x => x !== id); renderAll(); });
+    row.appendChild(rm);
+    list.appendChild(row);
+  }
+  box.appendChild(list);
+
+  const groups = C.heightGroups(job, multiIds);
+  if (groups.length === 1) box.appendChild(el('p', { class: 'count-line', 'data-testid': 'multi-heights' }, `Current height: ${groups[0].heightMm} mm for all`));
+  else if (groups.length > 1) box.appendChild(el('p', { class: 'count-line', 'data-testid': 'multi-heights' }, `Current heights are mixed: ${groups.map(g => `${g.heightMm} mm ×${g.count}`).join(', ')}`));
+
+  const max = C.ceilingHeightMm(job.room);
+  const errP = el('p', { class: 'field-err', 'data-testid': 'multi-err' }); errP.hidden = true;
+  const applyBtn = el('button', { class: 'btn-primary multi-apply', 'data-testid': 'multi-apply' }, `Apply to ${n} fitting${n === 1 ? '' : 's'}`);
+  applyBtn.disabled = true;
+
+  box.appendChild(el('label', { for: 'multi-height' }, 'New height to centre (mm)'));
+  const input = el('input', { type: 'number', inputmode: 'numeric', step: '10', id: 'multi-height', 'data-testid': 'multi-height', placeholder: 'e.g. 450' });
+  input.value = multiDraft; // typed text survives every rebuild
+  box.appendChild(input);
+  box.appendChild(errP);
+  box.appendChild(el('p', { class: 'field-note' }, 'Only the height changes. Position along the wall, type, layer and price stay the same.'));
+
+  // Checks the RAW text before rounding; never clamps silently. Runs in place —
+  // a renderAll here would wipe the typed text and close the keyboard.
+  const validateDraft = (dirty) => {
+    const raw = input.value.trim();
+    multiDraft = input.value;
+    if (!n) { applyBtn.disabled = true; if (dirty) { errP.textContent = 'Select at least one fitting first.'; errP.hidden = false; } return null; }
+    if (raw === '') { applyBtn.disabled = true; errP.hidden = !dirty; if (dirty) errP.textContent = `Enter a height from 0 to ${max} mm.`; return null; }
+    const v = Number(raw);
+    if (!Number.isFinite(v) || v < 0 || v > max) {
+      applyBtn.disabled = true; errP.hidden = false;
+      errP.textContent = max ? `Enter a height from 0 to ${max} mm.` : 'Set the room size first.';
+      return null;
+    }
+    errP.hidden = true; applyBtn.disabled = false; return v;
+  };
+  input.addEventListener('input', () => validateDraft(true));
+  validateDraft(false);
+
+  const doApply = () => {
+    if (!multiIds.length) { errP.textContent = 'Select at least one fitting first.'; errP.hidden = false; return; }
+    const v = validateDraft(true);
+    if (v === null) return;
+    const h = Math.round(v);
+    if (multiIds.every(id => job.items.find(i => i.id === id)?.heightMm === h)) {
+      toast(`All ${multiIds.length} are already at ${h} mm. Nothing changed.`);
+      return; // no commit, no undo entry
+    }
+    let res = null;
+    commit(() => { res = C.setWallHeights(job, multiIds, h); }); // throws before changing anything on a stale ID
+    if (!res) return; // commit already toasted the failure; job untouched
+    const { heightMm, count } = res;
+    multiIds = null; multiDraft = ''; // leave multi mode and clear the selection before the final render
+    renderAll();
+    toast(`Height set to ${heightMm} mm on ${count} fitting${count === 1 ? '' : 's'} · Undo`);
+  };
+  applyBtn.addEventListener('click', doApply);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doApply(); } });
+  box.appendChild(applyBtn);
+  const cancelBtn = el('button', { class: 'multi-cancel-btn', 'data-testid': 'multi-cancel' }, 'Cancel');
+  cancelBtn.addEventListener('click', () => { endMulti(); renderAll(); });
+  box.appendChild(cancelBtn);
+}
+
 function renderInspector() {
   document.body.classList.toggle('inspector-collapsed', inspectorCollapsed);
+  if (multiIds) { inspectorMultiPanel(); return; }
   const item = job.items.find(i => i.id === selectedId);
   if (!item) { inspectorRoomPanel(); return; }
   const box = $('#inspector');
@@ -657,6 +803,11 @@ function renderInspector() {
   const ceiling = item.wall === C.CEILING;
   mkNum('ins-fromleft', ceiling ? 'Across width (mm)' : 'From left end of wall (mm)', 'fromLeftMm');
   mkNum('ins-height', ceiling ? 'Across depth (mm)' : 'Height to centre (mm)', 'heightMm');
+  if (!ceiling) {
+    const multiBtn = el('button', { 'data-testid': 'multi-start-fitting' }, 'Set height for several');
+    multiBtn.addEventListener('click', () => startMulti(item.id));
+    box.appendChild(multiBtn);
+  }
 
   label('Notes');
   const ta = el('textarea', { 'data-testid': 'ins-notes' });
@@ -685,6 +836,7 @@ function renderInspector() {
 
 function renderAll() {
   if (!job) return;
+  pruneMulti();
   $('#btn-undo').disabled = !history.length;
   $('#btn-redo').disabled = !redoStack.length;
   $('#sample-chip').hidden = !job.sample;
@@ -1107,7 +1259,7 @@ function showStart() {
   $('#start-continue').hidden = !saved;
 }
 function beginJob(j) {
-  job = C.normaliseJob(j); history = []; redoStack = []; selectedId = null; view = 'PLAN'; zoom = { s: 1, tx: 0, ty: 0 };
+  job = C.normaliseJob(j); history = []; redoStack = []; selectedId = null; view = 'PLAN'; zoom = { s: 1, tx: 0, ty: 0 }; multiIds = null; multiDraft = ''; multiPending = null;
   shownLayers = new Set(C.LAYERS); layersOpen = false;
   $('#start').hidden = true; $('#app').hidden = false;
   renderAll();
@@ -1180,7 +1332,7 @@ function noteInput(e, outcome) {
 
 // Local-only drawing check shown in the Menu for support calls. Holds pointer
 // facts only, never job content, and is never sent anywhere.
-const BUILD_LABEL = 'Electrical layers update 1';
+const BUILD_LABEL = 'Electrical layers update 2';
 let downCount = 0;
 let lastDown = { id: null };
 function startDiag(e) {
@@ -1202,6 +1354,7 @@ function outcomeText(o) {
     'no-drawing': 'ignored because the room size isn’t set',
     'sketch-limit': 'ignored because this view has too many sketches',
     'select': 'picked up a fitting',
+    'multi-tap': 'added or removed a fitting from the selection',
     'pan': 'moved the drawing',
     'pan-pen-mode': 'moved the drawing (a pen was used, so fingers only move it)',
     'place': 'placed a fitting',
@@ -1255,6 +1408,7 @@ function explainWideTouch(width) {
 function cancelInteraction() {
   const drag = dragFitting;
   pinch = null; drawingStroke = null; panning = null; dragFitting = null; owner = null;
+  multiPending = null; // a cancelled or pinched tap never toggles
   if (drag) { job = C.normaliseJob(JSON.parse(drag.pre)); renderAll(); }
   else renderCanvas();
 }
@@ -1337,6 +1491,17 @@ $('#canvas').addEventListener('pointerdown', (e) => {
   if (fingerOnly && (mode !== 'select' || hitFitting)) explainFingerPan();
 
   if (mode === 'select' && !fingerOnly) {
+    if (multiIds) {
+      // Multi mode: a tap toggles a fitting; empty space only pans and never
+      // clears the selection. No dragFitting — moving happens through Apply or
+      // not at all.
+      if (hitFitting) multiPending = { id: hitFitting.getAttribute('data-id'), sx: e.clientX, sy: e.clientY };
+      else multiPending = null;
+      panning = { sx: e.clientX, sy: e.clientY, tx: zoom.tx, ty: zoom.ty };
+      owner = e.pointerId;
+      noteInput(e, hitFitting ? 'multi-tap' : 'pan');
+      return;
+    }
     if (hitFitting) {
       selectedId = hitFitting.getAttribute('data-id');
       dragFitting = { id: selectedId, moved: false, pre: snapshot() };
@@ -1491,6 +1656,18 @@ function endPointer(e) {
   if (pointers.size < 2) pinch = null;
   if (e.pointerId !== owner) return;
   owner = null;
+  if (multiPending) {
+    // A tap only counts if it moved less than 12 CSS px; longer drags were pans.
+    const pend = multiPending;
+    multiPending = null;
+    if (Math.hypot(e.clientX - pend.sx, e.clientY - pend.sy) < 12) {
+      const it = job.items.find(i => i.id === pend.id);
+      if (it && it.wall === C.CEILING) toast(`${pend.id} is a ceiling fitting, so it has no wall height. Not added.`);
+      else if (it) multiIds = multiIds.includes(pend.id) ? multiIds.filter(x => x !== pend.id) : [...multiIds, pend.id];
+    }
+    renderAll();
+    return;
+  }
   if (dragFitting) {
     if (dragFitting.moved) {
       // one history entry for the whole drag (snapshot taken before it started)
@@ -1550,10 +1727,13 @@ $('#canvas').addEventListener('wheel', (e) => {
 const MODES = ['select', 'place', 'draw', 'notes'];
 function setMode(m) {
   if (!MODES.includes(m)) return;
+  const leftMulti = m !== 'select' && !!multiIds;
+  if (leftMulti) endMulti(); // another tool leaves multi mode with no change
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   $('#place-palette').hidden = m !== 'place';
-  renderCanvas();
+  // leaving multi mode swaps the panel back; renderAll so the inspector follows
+  if (leftMulti) renderAll(); else renderCanvas();
 }
 document.querySelectorAll('.mode-btn[data-mode]').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
 
@@ -1621,6 +1801,7 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'Delete' && selectedId) { commit(() => { job.items = job.items.filter(i => i.id !== selectedId); }); toast(`${selectedId} deleted · Undo`); selectedId = null; renderAll(); }
   else if (e.key === 'Escape') {
     if (PHONE.matches && !$('#modal-root').firstChild) inspectorCollapsed = true;
+    endMulti(); // Escape outside a field cancels multi mode with no change
     selectedId = null; closeModal(); renderAll();
   }
   else if (e.key.toLowerCase() === 'v') setMode('select');
