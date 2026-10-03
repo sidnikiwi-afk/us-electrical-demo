@@ -78,6 +78,9 @@ button:disabled { opacity: .4; cursor: default; }
 .legend li { margin: 2px 0; }
 .q-chip { display: inline-block; background: #eef2f8; border-radius: 10px; padding: 1px 8px; margin: 1px 2px; }
 #quote-bar .q-chip { background: rgba(255,255,255,.18); }
+/* the missing-price warning chip is a button (the first tap of the fix route);
+   inside the bar it picks up the existing #quote-bar button colours */
+button.q-chip { border: 0; font: inherit; color: inherit; cursor: pointer; }
 .count-line { line-height: 1.7; }
 #inspector label { display: block; margin: 10px 0 2px; font-weight: 600; font-size: 14px; }
 #inspector input, #inspector select, #inspector textarea { width: 100%; font: inherit; padding: 8px; border: 1px solid #888; border-radius: 6px; min-height: 44px; }
@@ -102,11 +105,23 @@ button:disabled { opacity: .4; cursor: default; }
 .modal { background: #fff; border-radius: 12px; padding: 20px; max-width: 560px; width: min(560px, 92vw); max-height: 86vh; overflow-y: auto; }
 .modal h2 { margin-top: 0; }
 .modal .actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+/* Inside a modal's action row the destructive button must not become a
+   full-width bar above the safe action (the base .btn-danger styling is for
+   stacked solo warnings): side by side, safe primary action on the right. */
+.modal .actions .btn-danger { width: auto; margin-top: 0; }
 .modal table { border-collapse: collapse; width: 100%; margin: 8px 0; }
 .modal th, .modal td { border: 1px solid #bbb; padding: 6px 8px; text-align: left; font-size: 15px; }
 .modal .unpriced td { background: #fff3cd; }
+/* Slice 3 (BL-17): comfortable form fields in modals on EVERY screen size —
+   44px inputs with the page font, and labels on their own line above the
+   field. These used to exist only under the <=600px phone query, so tablets
+   and desktop fell back to ~21px browser-default number inputs. Rate rows
+   keep a FIXED input width so every row shares one left-aligned column. */
+.modal label { display: block; margin: 10px 0 2px; font-weight: 600; }
+.modal input:not([type=checkbox]) { width: 100%; font: inherit; padding: 8px; border: 1px solid #888; border-radius: 6px; min-height: 44px; }
 .rate-input-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
-.rate-input-row input { width: 130px; font: inherit; padding: 8px; border: 1px solid #888; border-radius: 6px; min-height: 44px; }
+.rate-input-row span { flex: 1; }
+.modal .rate-input-row input { flex: 0 0 130px; width: 130px; }
 
 /* The toast has no actions, so taps and pen strokes pass through to what is underneath. */
 #toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 64px; background: #23324d; color: #fff; padding: 10px 18px; border-radius: 24px; z-index: 60; font-size: 15px; max-width: 80vw; pointer-events: none; }
@@ -313,3 +328,15 @@ button:disabled { opacity: .4; cursor: default; }
 /* Review fix 1b: at least 8px between Apply and Cancel so they can't be
    mis-tapped as one target. */
 .multi-apply { margin-right: 8px; }
+
+/* Slice 1 recovery dialog: each preserved unreadable record is its own card so
+   several copies stay separately readable, and the destructive Delete button is
+   visually separated from Download (gap + danger colour). */
+.recovery-row { margin: 10px 0; padding: 8px 10px; border: 1px solid #d5d9e0; border-radius: 8px; }
+.recovery-row p { margin: 0 0 8px; }
+.recovery-row-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.recovery-row-actions .btn-danger { margin-left: 8px; }
+
+/* EP19-05 dense-spot chooser: one full-width button per candidate fitting so
+   close-together fittings are told apart by ID, type and wall, not position. */
+.which-row { display: block; width: 100%; margin: 6px 0; text-align: left; padding: 8px 12px; }

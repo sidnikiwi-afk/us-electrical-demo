@@ -35,9 +35,15 @@ The service worker caches the app for offline use after the first online visit.
    appear as labelled projection ticks, never wall-mounted.
 4. **Select/Drag** — click the **Select** button in the left rail first, then
    tap a fitting to edit it (in Place mode a tap places a new fitting instead —
-   that is intentional). Drag it (drags clamp to the wall; ceiling downlights
-   are grabbable by their centre), edit type/wall/position/notes in the
-   inspector, delete, then Undo/Redo (IDs are stable, revisions never reused).
+   that is intentional). A tap with a small wobble (under ~10 screen px) only
+   selects; dragging carries the fitting from wherever you grabbed it (drags
+   clamp to the wall; ceiling downlights are grabbable by their centre), forms
+   one Undo step, and survives pointercancel and two-finger pinch without a
+   half-move. Fittings stay grabbable a little beyond their symbol; fittings on
+   hidden layers are never targets; when two sit at the same spot the app asks
+   which one you meant instead of guessing. Edit type/wall/position/notes in
+   the inspector, delete, then Undo/Redo (IDs are stable, revisions never
+   reused).
 5. **Rates** — change a rate or leave it blank; the total honestly switches to
    "£X so far — total incomplete" and names what needs a price.
 6. **Sketches & notes** — Draw and Notes modes are never priced; Clear sketches
@@ -71,7 +77,7 @@ refresh before the new layout appears; saved jobs stay in the same browser.
 
 The Draw tool accepts wider finger contacts when no pen is active, and Clear
 sketches keeps the current tool selected. Menu includes a local Drawing check
-with build “Electrical layers update 2” and the last input result. It contains no job
+with build “Electrical finger update 3” and the last input result. It contains no job
 content and sends nothing to a server. Browser-injected touch checks supplement
 the earlier synthetic-event tests; actual iPad confirmation is still needed.
 

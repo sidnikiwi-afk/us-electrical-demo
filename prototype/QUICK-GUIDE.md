@@ -6,7 +6,8 @@ This is a practice tool with an invented barber shop and example labour prices. 
 2. Switch between the plan and the four wall views. Select a fitting to see its position, height and work type.
    Tap Show details to open the controls. Hide details gives the drawing more room; on an iPad or computer, the panel folds into a narrow strip on the right.
 3. Add a socket. The fitting count and labour total should change once.
-4. Move that socket. Its position should change in the other views without adding another charge.
+4. Move that socket. Its position should change in the other views without adding another charge. A small wobble as you tap selects without moving it; a deliberate drag carries it from wherever you took hold, and one Undo puts it back.
+   If two fittings sit at the same spot, the app asks which one you meant before selecting — it never guesses and never moves the wrong one.
 5. Delete it, then use Undo and Redo. The drawing, quantities and price should follow together.
 6. Try an unknown fitting or remove a labour rate. The page should say a price is missing, rather than making up a total.
 7. Make a note or sketch. These explain the job; they do not create electrical items or charges.
@@ -19,7 +20,7 @@ The prototype keeps one current job in this browser. Download backups for safeke
 
 If the old Details button remains after an update, refresh once more. Keep using the same browser and address so your saved job stays available.
 
-If finger drawing still does not work, select Draw and try one line, then open Menu. The Drawing check at the bottom shows the version and what happened to your touch. It stays on your device. The latest version says “Electrical layers update 2”.
+If finger drawing still does not work, select Draw and try one line, then open Menu. The Drawing check at the bottom shows the version and what happened to your touch. It stays on your device. The latest version says “Electrical finger update 3”.
 
 ## Give several fittings the same height
 
@@ -31,7 +32,9 @@ To give several fittings the same height, tap **Set height for several** (in the
 - If the box is blank or the height is above the room's ceiling, you get a message and nothing changes until you enter a valid height. Applying a height every chosen fitting already has does nothing and adds no Undo step.
 - Cancel, Escape or choosing another tool leaves the list without changing anything. Hiding a layer removes its fittings from the list and tells you.
 
-After typing a position or note, press Enter or tap another control before closing or reloading. An edit still in its field may not have been saved yet.
+After typing a position or note, keep typing or tap another control — a valid edit commits on its own within a second, and closing or reloading the page saves it first. An invalid number is never saved: the field goes back to the last valid value, and the status next to the menu says when something still needs fixing. While you are typing, the status says “Unsaved changes — typing…” and only changes to “Saved on this device” once the job really is stored.
+
+Forms with a Save button — Room size, Rates for this job and Job details — ask before they close on a stray background tap or Escape once you have edited them: **Keep editing** goes straight back to the form with your typing and caret as they were; **Throw away** closes it and loses only the unsaved typing (nothing is saved, and there is no Undo step for it). An untouched form still closes straight away, and the form's own Cancel always closes it without asking.
 
 ## Show different parts of the job
 

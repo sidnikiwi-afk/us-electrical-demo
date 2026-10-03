@@ -280,10 +280,19 @@ export function breakdown(job) {
     unknownQty,
     existingQty,
     totalPence: rows.reduce((s, r) => s + (r.linePence ?? 0), 0),
-    unpricedCount: rows.filter(r => r.status === 'unpriced').length + unknownQty,
+    // Count every AFFECTED FITTING, not unpriced type rows: 2 spurs + 2
+    // three-phase points + 1 unknown = 5, never "2 types + 1".
+    unpricedCount: rows.filter(r => r.status === 'unpriced').reduce((s, r) => s + r.qty, 0) + unknownQty,
     chargeableCount: rows.reduce((s, r) => s + r.qty, 0),
     complete: rows.every(r => r.status === 'priced') && unknownQty === 0,
   };
+}
+
+// The affected-fitting wording is shared by the room/status counts, the quote
+// bar, the breakdown drawer, the CSV and the print pack, so the count and the
+// phrase can never drift apart between surfaces.
+export function unpricedPhrase(n) {
+  return `${n} ${n === 1 ? 'fitting needs' : 'fittings need'} a price`;
 }
 
 export function formatPence(p) {
@@ -473,7 +482,7 @@ export function jobCsv(job) {
     lines.push([csvCell(TYPES.existing.label), bd.existingQty, '', '', csvCell('excluded')].join(','));
   }
   lines.push('');
-  lines.push([csvCell(bd.complete ? `Total ${formatPence(bd.totalPence)}` : `Total so far ${formatPence(bd.totalPence)} – incomplete, ${bd.unpricedCount} unpriced`)].join(','));
+  lines.push([csvCell(bd.complete ? `Total ${formatPence(bd.totalPence)}` : `Total so far ${formatPence(bd.totalPence)} – incomplete, ${unpricedPhrase(bd.unpricedCount)}`)].join(','));
   lines.push([csvCell('Whole job, all layers. Hiding layers on screen never changes this file.')].join(','));
   return lines.join('\r\n') + '\r\n';
 }

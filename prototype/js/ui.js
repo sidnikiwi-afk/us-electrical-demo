@@ -109,10 +109,14 @@ function commit(mutate) {
   if (history.length > C.LIMITS.historyLimit) history.shift();
   redoStack = [];
   job.revision += 1;
+  // A discrete edit (button, menu, drag, placement) ends any typing session:
+  // typing before and after it are separate undo units.
+  clearTimeout(sessionTimer); session = null;
   renderAll();
   scheduleSave();
 }
 function undo() {
+  clearDrafts(); // an uncommitted draft dies with the state it belonged to
   if (!history.length) return;
   const prevRevision = job.revision;
   redoStack.push(snapshot());
@@ -122,6 +126,7 @@ function undo() {
   renderAll(); scheduleSave();
 }
 function redo() {
+  clearDrafts();
   if (!redoStack.length) return;
   const prevRevision = job.revision;
   history.push(snapshot());
@@ -131,13 +136,129 @@ function redo() {
   renderAll(); scheduleSave();
 }
 
+// ---- Typing drafts (EP19-02: valid typing, honest save state) ---------------
+// Uncommitted text in one field — a fitting's note, the job note, or a
+// fitting's height/position number. A valid draft commits shortly after
+// typing pauses and also flushes synchronously on pagehide, so leaving or
+// reloading never loses site work. Invalid or partial numbers never reach
+// the job or storage and never overwrite the last valid value. One
+// continuous typing session in one field is a single undo step, and every
+// draft carries its own fitting id / job field, so switching selection,
+// jobs or forms can never apply it to the wrong target.
+const DRAFT_COMMIT_MS = 500;   // commit + save well inside a second of the last keystroke
+const SESSION_IDLE_MS = 2000;  // pauses longer than this end the typing session
+let draft = null;              // {key, target, value, valid, dirty}
+let draftTimer = null;
+let session = null;            // {key, pushed, orig, frame} — one undo frame per typing session
+let sessionTimer = null;
+
+function chipTyping() {
+  const chip = $('#save-chip');
+  chip.className = 'chip warn';
+  chip.textContent = 'Unsaved changes — typing…';
+  chip.onclick = null;
+}
+function chipInvalidDraft() {
+  const chip = $('#save-chip');
+  chip.className = 'chip warn';
+  chip.textContent = 'Not saved yet — fix the highlighted number';
+  chip.onclick = null;
+}
+function clearDrafts() {
+  clearTimeout(draftTimer); clearTimeout(sessionTimer);
+  draft = null; session = null; draftTimer = null; sessionTimer = null;
+}
+// Register input in one field. A draft in a DIFFERENT field commits first,
+// so quick field-to-field typing cannot drop the earlier edit.
+function setDraft(d) {
+  if (draft && draft.key !== d.key) flushDraft();
+  draft = d;
+  clearTimeout(draftTimer);
+  if (!session || session.key !== d.key) {
+    // remember where the field started, so a session that types it back to
+    // that value can drop its own (visually empty) undo frame
+    const t = d.target.kind === 'job' ? job : job.items.find(i => i.id === d.target.id);
+    session = { key: d.key, pushed: false, orig: t ? t[d.target.field] : undefined, frame: null };
+  }
+  clearTimeout(sessionTimer);
+  sessionTimer = setTimeout(() => { session = null; }, SESSION_IDLE_MS);
+  if (d.dirty) { if (d.valid) chipTyping(); else chipInvalidDraft(); }
+  draftTimer = setTimeout(flushDraft, DRAFT_COMMIT_MS);
+}
+// Commit the pending draft now. Valid + changed: one undo frame per typing
+// session, target resolved by stored id/field (never by what is selected
+// now). Invalid or unchanged drafts change nothing. An INVALID draft stays
+// registered (nothing is stored, but the save chip and the blur/restore
+// path must keep knowing the field is showing a refused value). Returns the
+// draft it examined, so callers can react to an invalid one.
+function flushDraft() {
+  clearTimeout(draftTimer); draftTimer = null;
+  const d = draft; draft = null;
+  if (!d || !job || !d.valid) { if (d && !d.valid) draft = d; return d; }
+  const t = d.target.kind === 'job' ? job : job.items.find(i => i.id === d.target.id);
+  if (!t) return d; // its fitting is gone (deleted/replaced): the draft dies with it
+  if (t[d.target.field] === d.value) { saveNow(); return d; } // same-value input: nothing stored, no undo step
+  const pre = snapshot();
+  t[d.target.field] = d.value;
+  const inSession = session && session.key === d.key;
+  if (!(inSession && session.pushed)) { // the session's first commit owns its single undo frame
+    history.push(pre);
+    if (history.length > C.LIMITS.historyLimit) history.shift();
+    redoStack = [];
+    if (inSession) { session.pushed = true; session.frame = pre; }
+  } else if (session.orig !== undefined && d.value === session.orig
+    && history.length && history[history.length - 1] === session.frame) {
+    // the session typed the field back to where it started: its undo frame
+    // would change nothing visible, so drop it again — and hand ownership back,
+    // so typing that goes somewhere new still gets exactly one new frame
+    history.pop();
+    session.pushed = false;
+    session.frame = null;
+  }
+  job.revision += 1;
+  // Never rebuild the panel the draft lives in: focus, caret and the
+  // on-screen keyboard stay put (also across focus transitions between two
+  // of its fields, while activeElement is briefly the body); the drawing
+  // and counts still refresh.
+  if (d.elem && d.elem.isConnected) renderAllButInspector(); else renderAll();
+  scheduleSave();
+  return d;
+}
+function renderAllButInspector() {
+  renderTabs(); renderLayers(); renderCanvas(); renderQuote(); syncFooterHeight();
+  updateHistoryButtons();
+}
+// Drop a draft without committing it and put its field back to the stored
+// value. Used by in-field Ctrl+Z before the session committed: undoing "the
+// typing" must not consume an unrelated earlier undo step.
+function discardDraft(d) {
+  clearDrafts();
+  if (d && d.elem && d.elem.isConnected && job) {
+    const t = d.target.kind === 'job' ? job : job.items.find(i => i.id === d.target.id);
+    if (t) d.elem.value = t[d.target.field];
+  }
+  saveNow(); // chip back to the honest stored state
+}
+// Leaving the page: valid drafts go in and save NOW (storage is synchronous);
+// invalid drafts are simply not stored. This assists the debounce — the
+// debounce, not this handler, is the main mechanism.
+window.addEventListener('pagehide', () => {
+  if (!job) return;
+  flushDraft();
+  clearTimeout(saveTimer);
+  saveNow();
+});
+
 // ---- Storage (honest failures) ---------------------------------------------
 let saveTimer = null;
 function scheduleSave() { clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, 400); }
 function saveNow() {
   const chip = $('#save-chip');
-  chip.className = 'chip';
-  chip.textContent = 'Saving…';
+  // A save that lands while a newer edit is still being typed must not stamp
+  // over the typing/invalid chip state — not on entry, and especially not
+  // with a false "Saved" on exit.
+  const pendingDraft = draft && draft.dirty ? draft : null;
+  if (!pendingDraft) { chip.className = 'chip'; chip.textContent = 'Saving…'; }
   let text;
   try {
     text = C.serialiseJob({ ...job, savedAt: new Date().toISOString() });
@@ -154,8 +275,51 @@ function saveNow() {
     return;
   }
   try {
+    // Never silently overwrite an unreadable saved record. If the main key
+    // still holds one (quarantine failed or was bypassed), try to move it
+    // aside; if that also fails (storage blocked or all recovery slots full),
+    // refuse to save and offer the raw download.
+    let existing = null;
+    let existingReadFailed = false;
+    try { existing = localStorage.getItem(STORAGE_KEY); }
+    catch { existingReadFailed = true; }
+    if (existingReadFailed) {
+      // Failure to inspect the saved record must fail closed: whatever is in
+      // the main key — possibly an unreadable job needing recovery — is never
+      // overwritten by a save that could not check it.
+      chip.className = 'chip err';
+      chip.textContent = 'Not saved — this device’s storage would not let us check the saved job, so nothing was overwritten. Tap to download a backup.';
+      chip.onclick = () => downloadBackup();
+      toast('Your job is still on screen but not saved: the saved job in this device’s storage could not be read, so saving stopped rather than risk replacing it. Download a backup, then retry.');
+      return;
+    }
+    let existingBad = null;
+    if (existing) {
+      const r = C.parseBackup(existing); // never throws
+      if (!r.ok) existingBad = existing;
+    }
+    if (existingBad !== null && !quarantineUnreadable(existingBad)) {
+      recoveryPendingMain = existingBad;
+      chip.className = 'chip err';
+      chip.textContent = 'Not saved — an unreadable saved job is still in storage. Tap to download it.';
+      chip.onclick = () => { downloadRawRecord(existingBad); toast('Download started — check your Downloads folder and keep it somewhere safe.'); };
+      toast('Your job is on screen but not saved: an unreadable saved job still occupies this device’s storage and could not be moved aside. Download it from Menu → Recover unreadable saved data, delete it there, then try again.');
+      return;
+    }
+    if (existingBad !== null) recoveryPendingMain = null;
     localStorage.setItem(STORAGE_KEY, text);
+    // "Saved" only means saved: read the record back and compare before the
+    // chip is allowed to claim persistence.
+    let readBack = null;
+    try { readBack = localStorage.getItem(STORAGE_KEY); } catch { /* checked below */ }
+    if (readBack !== text) throw new Error('stored copy did not read back identically');
     job.savedAt = JSON.parse(text).savedAt; // in step with what was actually saved
+    if (pendingDraft) {
+      // stored fine, but a newer edit is still uncommitted in a field: say
+      // that honestly instead of claiming Saved over it
+      if (pendingDraft.valid) chipTyping(); else chipInvalidDraft();
+      return;
+    }
     const time = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
     chip.className = 'chip ok';
     chip.textContent = `Saved on this device · ${time}`;
@@ -177,9 +341,171 @@ function loadSaved() {
   } catch { return null; }
 }
 
+// ---- Unreadable saved data (BL-04) ----------------------------------------
+// A saved record that fails parseBackup is never silently replaced. Each one is
+// kept word-for-word under its own numbered key (bounded, never overwriting a
+// different preserved copy) so recovery survives reloads. The user decides per
+// record: download it, or explicitly delete that one record. Downloading starts
+// a browser download only — it does not prove a file was kept, and it clears
+// nothing: the copy stays until it is explicitly deleted.
+const RECOVERY_PREFIX = 'surface.job.unreadable.';
+const RECOVERY_MAX = 3; // bounded: beyond this, saving fails closed instead
+function readStored() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return { status: 'empty' };
+    const r = C.parseBackup(raw);
+    return r.ok ? { status: 'ok', job: r.job } : { status: 'unreadable', raw, errors: r.errors };
+  } catch (err) {
+    // reading storage itself threw (blocked/private mode): say so, don't claim "empty"
+    return { status: 'blocked', errors: [String(err && err.message || err)] };
+  }
+}
+// Every preserved unreadable record still in storage. key null means the record
+// is stuck in the MAIN key because the quarantine copy could not be written.
+function recoverySlots() {
+  const out = [];
+  for (let i = 1; i <= RECOVERY_MAX; i++) {
+    const key = RECOVERY_PREFIX + i + '.v1';
+    let raw = null;
+    try { raw = localStorage.getItem(key); } catch { raw = null; }
+    if (raw !== null) out.push({ key, raw });
+  }
+  return out;
+}
+// In-memory record for the rare case the quarantine copy could not be written:
+// download and delete must still be offered, and the Menu entry must show.
+let recoveryPendingMain = null; // raw text of the unreadable record in STORAGE_KEY
+function recoveryAll() {
+  return [...recoverySlots(), ...(recoveryPendingMain ? [{ key: null, raw: recoveryPendingMain }] : [])];
+}
+function hasRecovery() { return recoveryAll().length > 0; }
+// Move an unreadable record aside (copy to a free recovery key, then remove the
+// original) so normal saving can never overwrite it. Never overwrites a
+// different preserved copy; with no free slot it fails closed and leaves the
+// original in the main key (the save guard then refuses to replace it).
+function quarantineUnreadable(raw) {
+  const slots = recoverySlots();
+  if (slots.some(s => s.raw === raw)) {
+    // already preserved (e.g. a re-run): just clear the main-key original
+    try { localStorage.removeItem(STORAGE_KEY); } catch { /* guard still protects it */ }
+    return true;
+  }
+  const used = new Set(slots.map(s => s.key));
+  let free = null;
+  for (let i = 1; i <= RECOVERY_MAX; i++) { const k = RECOVERY_PREFIX + i + '.v1'; if (!used.has(k)) { free = k; break; } }
+  if (!free) return false; // fail closed: no copy is overwritten or dropped
+  try { localStorage.setItem(free, raw); } catch { return false; }
+  try { localStorage.removeItem(STORAGE_KEY); } catch { /* copy is safe; the guard still protects the original */ }
+  return true;
+}
+function downloadRawRecord(raw) {
+  download(`unreadable-saved-job-${stamp()}.json`, raw, 'application/json');
+}
+// Plain-language reason for an unreadable record (parseBackup never throws).
+function recoveryReason(raw) {
+  const r = C.parseBackup(raw);
+  if (r.ok) return 'unknown problem';
+  if (r.errors[0] === 'not valid JSON') return 'the saved file is incomplete or damaged';
+  return r.errors[0] || 'unknown problem';
+}
+// Delete exactly this one record, wherever it lives. Verifies the removal
+// before reporting success; never touches any other key.
+function deleteRecoveryRecord(rec) {
+  if (rec.key === null) {
+    // still in the MAIN key (quarantine failed earlier): remove only if the
+    // main key still holds exactly this record, never a newer valid save
+    let cur;
+    try { cur = localStorage.getItem(STORAGE_KEY); }
+    catch { return false; } // can't even read: not deleted; keep the pending reference
+    if (cur === rec.raw) {
+      try { localStorage.removeItem(STORAGE_KEY); } catch { /* checked below */ }
+      try { cur = localStorage.getItem(STORAGE_KEY); }
+      catch { return false; } // removal can't be verified: not deleted; keep the pending reference
+      if (cur === rec.raw) return false; // still there: not deleted
+    } else {
+      return false; // a different (e.g. newer valid) record: never delete it or claim success
+    }
+    recoveryPendingMain = null;
+    return true;
+  }
+  try { localStorage.removeItem(rec.key); } catch { /* checked below */ }
+  let after;
+  try { after = localStorage.getItem(rec.key); } catch { after = 'unread'; }
+  return after === null;
+}
+function openRecovery() {
+  const records = recoveryAll();
+  if (!records.length) { toast('No unreadable saved data left on this device.'); return; }
+  const box = el('div');
+  box.appendChild(el('p', {}, `${records.length === 1 ? 'A job' : `${records.length} jobs`} saved on this device couldn’t be read. Each copy is kept exactly as it was, so nothing is lost.`));
+  box.appendChild(el('p', { style: 'font-size:14px' }, 'Downloading starts a download of the copy — check it lands in your Downloads folder and keep it somewhere safe. A download clears nothing: a copy stays until you delete it. Deleting removes only that one unreadable record; it never touches other data.'));
+  const list = el('div');
+  for (const [i, rec] of records.entries()) {
+    const row = el('div', { class: 'recovery-row', 'data-testid': `recovery-row-${i}` });
+    const p = el('p', {}, `Copy ${i + 1} of ${records.length}: ${recoveryReason(rec.raw)}${rec.key === null ? ' — still in the main saved-job slot (this device’s storage refused to move it aside)' : ''}.`);
+    const btns = el('div', { class: 'recovery-row-actions' });
+    const dl = el('button', { class: 'btn-primary', 'data-testid': `recovery-download-${i}` }, 'Download this copy');
+    dl.addEventListener('click', () => {
+      downloadRawRecord(rec.raw);
+      toast('Download started — check your Downloads folder. The copy stays listed here until you delete it.');
+    });
+    const del = el('button', { class: 'btn-danger', 'data-testid': `recovery-delete-${i}` }, 'Delete this copy');
+    del.addEventListener('click', () => {
+      modal('Delete this unreadable copy?', [
+        el('p', {}, 'This removes only this unreadable saved record from this device. It cannot be undone — download it first if you might need it.'),
+      ], [
+        { label: 'Keep it', testid: 'recovery-keep', fn: () => openRecovery() },
+        {
+          label: 'Delete copy', class: 'btn-danger', testid: 'recovery-delete-confirm', fn: () => {
+            if (!deleteRecoveryRecord(rec)) {
+              openRecovery(); // keep the list on screen: nothing was deleted
+              toast('Not deleted — this device’s storage refused. The copy is still there.');
+              return;
+            }
+            if (hasRecovery()) openRecovery();
+            else closeModal();
+            toast('Unreadable copy deleted. Nothing else was changed.');
+          },
+        },
+      ]);
+    });
+    btns.append(dl, del);
+    row.append(p, btns);
+    list.appendChild(row);
+  }
+  box.appendChild(list);
+  modal('Saved job couldn’t be read', [box], [
+    { label: 'Close', class: 'btn-primary', testid: 'recovery-close', fn: closeModal },
+  ]);
+}
+
 // ---- Modal helpers ----------------------------------------------------------
-function closeModal() { $('#modal-root').innerHTML = ''; }
-function modal(title, bodyNodes, actions = []) {
+let modalOpener = null;   // control focused when the current modal opened
+let lastFormFocus = null; // last field focused inside the open guarded form
+function closeModal() {
+  $('#modal-root').innerHTML = '';
+  modalDismissGuard = null;
+  discardConfirmEl = null;
+  discardPriorFocus = null;
+  lastFormFocus = null;
+  const op = modalOpener;
+  modalOpener = null;
+  // Closing by any route (Save / Cancel / Throw away) hands focus back to the
+  // control that opened the form, so keyboard users are not dropped on <body>.
+  if (op && op.isConnected && op.focus) { try { op.focus({ preventScroll: true }); } catch { } }
+}
+// Slice 3 (BL-03): an EDITED form must not disappear on a stray backdrop tap
+// or Escape. When set, modalDismissGuard runs before any implicit close; it
+// returns false to keep the modal open — usually because it has just asked
+// Keep editing / Throw away.
+let modalDismissGuard = null;
+function requestCloseModal() {
+  if (modalDismissGuard && modalDismissGuard() === false) return false;
+  closeModal();
+  return true;
+}
+function modal(title, bodyNodes, actions = [], opts = {}) {
   const overlay = el('div', { class: 'overlay' });
   const box = el('div', { class: 'modal' });
   box.appendChild(el('h2', {}, title));
@@ -193,12 +519,76 @@ function modal(title, bodyNodes, actions = []) {
   }
   box.appendChild(actRow);
   overlay.appendChild(box);
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeModal(); });
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) requestCloseModal(); });
+  modalOpener = (document.activeElement && document.activeElement.focus && document.activeElement !== document.body) ? document.activeElement : null;
+  lastFormFocus = null;
   $('#modal-root').innerHTML = '';
   $('#modal-root').appendChild(overlay);
+  modalDismissGuard = opts.onDismiss || null;
+  discardConfirmEl = null;
   return box;
 }
 
+// ---- Edited-form dismissal guard (slice 3, BL-03) ----------------------------
+// Backdrop or Escape on an edited Rates / Room size / Job details form asks
+// "Keep editing or Throw away" instead of silently losing the typing. Untouched
+// forms close as before, and the form's own Cancel always discards without
+// asking. The question is a second overlay stacked on the untouched form, so
+// Keep editing returns to exactly the same fields, values, caret and focus,
+// and Throw away closes with no commit — so no extra undo step either.
+let discardConfirmEl = null;
+let discardPriorFocus = null;
+function closeDiscardConfirm() {
+  if (!discardConfirmEl) return;
+  discardConfirmEl.remove();
+  discardConfirmEl = null;
+  const formOverlay = $('#modal-root .overlay');
+  if (formOverlay) formOverlay.inert = false; // the form takes the keyboard back
+  const f = discardPriorFocus;
+  discardPriorFocus = null;
+  // Restore the field the user was in — for a REAL tap this is the remembered
+  // focusin target, because pointerdown already blurred the input to <body>.
+  if (f && $('#modal-root').contains(f) && f.focus) { f.focus({ preventScroll: true }); return; }
+  const firstInput = formOverlay && formOverlay.querySelector('input');
+  if (firstInput) firstInput.focus({ preventScroll: true });
+}
+function askDiscardEdits(what) {
+  if (discardConfirmEl) return;
+  // A real backdrop tap blurs the field on pointerdown, so activeElement is
+  // <body> by now: remember the last field focused inside the form instead.
+  discardPriorFocus = (lastFormFocus && lastFormFocus.isConnected) ? lastFormFocus : document.activeElement;
+  const formOverlay = $('#modal-root .overlay');
+  if (formOverlay) formOverlay.inert = true; // the question owns the keyboard: no edits behind it
+  const overlay = el('div', { class: 'overlay' });
+  const box = el('div', { class: 'modal' });
+  box.appendChild(el('h2', {}, 'Throw away your changes?'));
+  box.appendChild(el('p', {}, `${what} Keep editing goes back to the form with everything as you left it — nothing is saved until you use its Save button.`));
+  const actRow = el('div', { class: 'actions' });
+  const toss = el('button', { class: 'btn-danger', 'data-testid': 'discard-throw' }, 'Throw away');
+  toss.addEventListener('click', closeModal);
+  const keep = el('button', { class: 'btn-primary', 'data-testid': 'discard-keep' }, 'Keep editing');
+  keep.addEventListener('click', closeDiscardConfirm);
+  actRow.append(toss, keep); // Save-style primary action stays on the right
+  box.appendChild(actRow);
+  overlay.appendChild(box);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeDiscardConfirm(); });
+  discardConfirmEl = overlay;
+  $('#modal-root').appendChild(overlay);
+  keep.focus();
+}
+function guardedForm(title, bodyNodes, actions, isEdited, what) {
+  const boxEl = modal(title, bodyNodes, actions, {
+    onDismiss: () => {
+      if (discardConfirmEl) { closeDiscardConfirm(); return false; }
+      if (!isEdited()) return true; // untouched: close normally, no nagging
+      askDiscardEdits(what);
+      return false;
+    },
+  });
+  // Track the last field focused inside this form so a REAL backdrop tap
+  // (which blurs on pointerdown) can still restore focus on Keep editing.
+  boxEl.addEventListener('focusin', (e) => { lastFormFocus = e.target; });
+}
 // ---- Coordinate geometry ----------------------------------------------------
 // Oracle: walls are viewed from INSIDE the room, fromLeft 0 at the viewer's
 // left. A: offset = x; B: offset = y; C: offset = W−x; D: offset = D−y.
@@ -544,12 +934,16 @@ function renderQuote() {
       ...bd.rows.filter(r => r.status === 'unpriced').map(r => r.label.toLowerCase()),
       ...job.items.filter(i => i.type === 'unknown').map(i => i.id),
     ];
-    const warn = chip(null, 'q-warn');
+    // The warning itself is the first tap of the fix route: it opens the
+    // prices-missing sheet, whose Edit rates / Show F.. buttons are the second.
+    const warn = el('button', { class: 'q-chip q-warn', 'data-testid': 'price-warning', title: 'Open what needs a price' });
+    warn.style.whiteSpace = 'nowrap';
     warn.append(
       el('span', { 'aria-hidden': 'true' }, '⚠ '),
-      `${bd.unpricedCount} ${bd.unpricedCount === 1 ? 'needs' : 'need'} a price`,
+      C.unpricedPhrase(bd.unpricedCount),
       el('span', { class: 'q-detail' }, ` (${missing.join(', ')})`),
     );
+    warn.addEventListener('click', openPriceWarnings);
     sum.append(warn);
   }
   const total = chip(bd.complete ? `Total ${C.formatPence(bd.totalPence)}` : `${C.formatPence(bd.totalPence)} so far`, 'q-total');
@@ -605,12 +999,18 @@ function inspectorRoomPanel() {
   const ta = el('textarea', { 'data-testid': 'job-notes' });
   ta.value = job.jobNotes;
   box.appendChild(ta);
-  ta.addEventListener('change', () => commit(() => { job.jobNotes = ta.value.slice(0, 5000); }));
+  // Drafts: valid text commits after a short typing pause (and on pagehide),
+  // one undo step per typing session, keyed to the job itself.
+  ta.addEventListener('input', () => {
+    const value = ta.value.slice(0, 5000);
+    setDraft({ key: 'job:jobNotes', target: { kind: 'job', field: 'jobNotes' }, value, valid: true, dirty: value !== job.jobNotes, elem: ta });
+  });
+  ta.addEventListener('change', () => flushDraft());
   const bd = C.breakdown(job);
   const pricedQty = bd.rows.filter(r => r.status === 'priced').reduce((s, r) => s + r.qty, 0);
   const counts = el('p', { class: 'count-line' });
   const cnt = (t) => { const s = el('span', { class: 'q-chip' }, t); s.style.whiteSpace = 'nowrap'; return s; };
-  counts.append(cnt(`${job.items.length} fittings`), cnt(`${pricedQty} priced`), cnt(`${bd.unpricedCount} ${bd.unpricedCount === 1 ? 'needs' : 'need'} a price`), cnt(`${bd.existingQty} existing not counted`));
+  counts.append(cnt(`${job.items.length} fittings`), cnt(`${pricedQty} priced`), cnt(C.unpricedPhrase(bd.unpricedCount)), cnt(`${bd.existingQty} existing not counted`));
   box.appendChild(counts);
   const lc = C.layerCounts(job);
   const layerLine = el('p', { class: 'count-line', 'data-testid': 'layer-counts' });
@@ -783,20 +1183,63 @@ function renderInspector() {
     const minus = el('button', {}, '−50');
     const plus = el('button', {}, '+50');
     const errP = el('p', { class: 'field-err' }); errP.hidden = true;
-    const apply = (v) => {
-      const max = key === 'fromLeftMm' ? C.maxFromLeft(job, item) : C.maxHeight(job, item);
-      if (!Number.isFinite(v) || v < 0 || v > max) {
+    const max = () => key === 'fromLeftMm' ? C.maxFromLeft(job, item) : C.maxHeight(job, item);
+    const read = () => {
+      const m = max();
+      const raw = input.value.trim();
+      if (raw === '') return { valid: false, value: null };
+      const v = Number(raw);
+      if (!Number.isFinite(v) || v < 0 || v > m) return { valid: false, value: null };
+      return { valid: true, value: Math.round(v) };
+    };
+    // Live draft: valid numbers commit after a short typing pause (and on
+    // pagehide); invalid, PARTIAL (e.g. "12-") or EMPTY input never reaches
+    // the job or storage — and every refused state shows visible guidance,
+    // so the chip's "fix the highlighted number" always has something
+    // highlighted.
+    input.addEventListener('input', () => {
+      const r = read();
+      if (!r.valid) {
         errP.textContent = key === 'fromLeftMm'
-          ? `Enter 0–${max.toLocaleString('en-GB')} mm along this wall.`
-          : `Enter 0–${max.toLocaleString('en-GB')} mm.`;
+          ? `Enter a number from 0 to ${max().toLocaleString('en-GB')} mm along this wall.`
+          : `Enter a number from 0 to ${max().toLocaleString('en-GB')} mm.`;
+        errP.hidden = false;
+      } else errP.hidden = true;
+      setDraft({
+        key: `item:${item.id}:${key}`,
+        target: { kind: 'item', id: item.id, field: key },
+        value: r.value, valid: r.valid,
+        dirty: input.value !== String(item[key]),
+        elem: input,
+      });
+    });
+    input.addEventListener('change', () => {
+      flushDraft();
+      // Re-check the FIELD itself, not the draft: the 500 ms debounce may
+      // already have consumed the invalid draft, and the field must never
+      // keep displaying a value the job refused.
+      if (!read().valid) {
+        errP.hidden = false;
+        input.value = item[key];
+        draft = null; // the refused value is resolved together with its field
+        saveNow(); // the chip returns to the honest stored state
+      }
+    });
+    const bump = (delta) => {
+      flushDraft(); // apply what was typed before bumping from it
+      const v = item[key] + delta;
+      const m = max();
+      if (!(Number.isFinite(v) && v >= 0 && v <= m)) {
+        errP.textContent = key === 'fromLeftMm'
+          ? `Enter 0–${m.toLocaleString('en-GB')} mm along this wall.`
+          : `Enter 0–${m.toLocaleString('en-GB')} mm.`;
         errP.hidden = false; input.value = item[key]; return;
       }
       errP.hidden = true;
-      commit(() => { item[key] = Math.round(v); });
+      commit(() => { item[key] = v; });
     };
-    input.addEventListener('change', () => apply(Number(input.value)));
-    minus.addEventListener('click', () => apply(item[key] - 50));
-    plus.addEventListener('click', () => apply(item[key] + 50));
+    minus.addEventListener('click', () => bump(-50));
+    plus.addEventListener('click', () => bump(50));
     row.append(input, minus, plus);
     box.append(row, errP);
   };
@@ -813,7 +1256,13 @@ function renderInspector() {
   const ta = el('textarea', { 'data-testid': 'ins-notes' });
   ta.value = item.notes;
   box.appendChild(ta);
-  ta.addEventListener('change', () => commit(() => { item.notes = ta.value.slice(0, C.LIMITS.maxTextLen); }));
+  // Draft keyed to this fitting's id: switching selection or jobs while the
+  // debounce is pending can never apply the text to the wrong target.
+  ta.addEventListener('input', () => {
+    const value = ta.value.slice(0, C.LIMITS.maxTextLen);
+    setDraft({ key: `item:${item.id}:notes`, target: { kind: 'item', id: item.id, field: 'notes' }, value, valid: true, dirty: value !== item.notes, elem: ta });
+  });
+  ta.addEventListener('change', () => flushDraft());
 
   const price = el('p', { class: 'price-line', 'data-testid': 'price-line' });
   if (item.type === 'existing') price.textContent = 'Existing — no work, not counted on any layer';
@@ -834,11 +1283,18 @@ function renderInspector() {
   box.appendChild(del);
 }
 
+function updateHistoryButtons() {
+  $('#btn-undo').disabled = !history.length;
+  $('#btn-redo').disabled = !redoStack.length;
+  // QA-readable depth: how many undo/redo steps are stacked right now
+  $('#btn-undo').dataset.history = String(history.length);
+  $('#btn-redo').dataset.history = String(redoStack.length);
+}
+
 function renderAll() {
   if (!job) return;
   pruneMulti();
-  $('#btn-undo').disabled = !history.length;
-  $('#btn-redo').disabled = !redoStack.length;
+  updateHistoryButtons();
   $('#sample-chip').hidden = !job.sample;
   $('#btn-job-name').textContent = job.name;
   // A hidden fitting can't stay selected: it could be moved or deleted unseen.
@@ -866,10 +1322,12 @@ else PHONE.addListener(onPhoneChange);
 function openRoomForm() {
   const box = el('div');
   const fields = {};
+  const initial = {};
   const mk = (key, labelTxt, max) => {
     box.appendChild(el('label', {}, labelTxt));
     const i = el('input', { type: 'number', inputmode: 'decimal', step: '0.01', min: '0.1', max: String(max), 'data-testid': `room-${key}` });
     i.value = job.room[key] ?? '';
+    initial[key] = i.value;
     box.appendChild(i);
     fields[key] = { input: i, max };
   };
@@ -877,7 +1335,8 @@ function openRoomForm() {
   mk('depthM', 'Depth (m)', C.LIMITS.maxWallM);
   mk('heightM', 'Height (m)', C.LIMITS.maxHeightM);
   const errP = el('p', { class: 'field-err' }); errP.hidden = true; box.appendChild(errP);
-  modal('Room size', [box], [
+  const isEdited = () => ['widthM', 'depthM', 'heightM'].some(k => fields[k].input.value !== initial[k]);
+  guardedForm('Room size', [box], [
     { label: 'Cancel', fn: closeModal },
     {
       label: 'Save', class: 'btn-primary', testid: 'room-save', fn: () => {
@@ -898,7 +1357,7 @@ function openRoomForm() {
         closeModal();
       },
     },
-  ]);
+  ], isEdited, 'You have edited the room size.');
 }
 function askShrink(vals, outside) {
   modal(`${outside.length} fitting${outside.length > 1 ? 's' : ''} would sit outside the new size`,
@@ -920,11 +1379,13 @@ function openRates() {
   box.appendChild(el('p', {}, 'These rates are saved with this job. Changing them reprices this job only.'));
   box.appendChild(el('p', { style: 'font-size:14px' }, 'Fused spur and three-phase point have no example rate. Add your own price, or leave them blank and they’ll show as needing a price.'));
   const inputs = {};
+  const initial = {};
   for (const k of C.RATE_KEYS) {
     const row = el('div', { class: 'rate-input-row' });
     row.appendChild(el('span', {}, C.TYPES[k].label));
     const i = el('input', { type: 'number', inputmode: 'decimal', step: '0.01', min: '0.01', 'data-testid': `rate-${k}` });
     i.value = C.rateFor(job, k) === null ? '' : (C.rateFor(job, k) / 100).toFixed(2);
+    initial[k] = i.value;
     i.placeholder = 'unpriced';
     row.appendChild(i);
     inputs[k] = i;
@@ -932,7 +1393,8 @@ function openRates() {
   }
   const errP = el('p', { class: 'field-err' }); errP.hidden = true; box.appendChild(errP);
   box.appendChild(el('p', { class: 'field-err' }, 'Leave blank to mark a type unpriced. Enter a price above £0, or leave blank.'));
-  modal('Rates for this job', [box], [
+  const isEdited = () => C.RATE_KEYS.some(k => inputs[k].value !== initial[k]);
+  guardedForm('Rates for this job', [box], [
     { label: 'Cancel', fn: closeModal },
     {
       label: 'Save rates', class: 'btn-primary', testid: 'rates-save', fn: () => {
@@ -952,10 +1414,59 @@ function openRates() {
         closeModal();
       },
     },
-  ]);
+  ], isEdited, 'You have edited the rates for this job.');
 }
 
 // ---- Breakdown drawer ---------------------------------------------------------
+// The quote-bar warning opens this sheet: one tap from the warning, and its
+// Edit rates / Show F.. buttons are the second tap to the relevant edit. It
+// reuses the existing Rates form and fitting inspector — no duplicate controls.
+function openPriceWarnings() {
+  const bd = C.breakdown(job);
+  const unpricedRows = bd.rows.filter(r => r.status === 'unpriced');
+  const unknowns = job.items.filter(i => i.type === 'unknown');
+  if (bd.complete) { toast('Every fitting has a price — nothing to fix.'); return; }
+  const box = el('div');
+  box.appendChild(el('p', {}, `${C.unpricedPhrase(bd.unpricedCount)} before the total is complete:`));
+  const list = el('ul', { class: 'legend', 'data-testid': 'price-warning-list' });
+  for (const r of unpricedRows) {
+    list.appendChild(el('li', {}, `${r.qty} × ${r.label} — no rate set. Edit rates to price ${r.qty === 1 ? 'it' : 'them'}.`));
+  }
+  for (const u of unknowns) {
+    list.appendChild(el('li', {}, `${u.id} is an unknown fitting — no work type, so no rate can price it. Show it to name its type or remove it.`));
+  }
+  box.appendChild(list);
+  const actions = unknowns.map(u => ({
+    label: `Show ${u.id}`, testid: `warn-show-${u.id}`, fn: () => { closeModal(); revealUnknownFitting(u.id); },
+  }));
+  actions.push(
+    { label: 'Edit rates', class: 'btn-primary', testid: 'warn-edit-rates', fn: () => { closeModal(); openRates(); } },
+    { label: 'Close', fn: closeModal },
+  );
+  modal('Prices still missing', [box], actions);
+}
+
+// Select an unknown fitting and bring the user to it: show its layer if
+// hidden, switch to a view it is drawn on, and expand the details panel with
+// its type selector ready. No job change — pure view/selection state.
+function revealUnknownFitting(id) {
+  const it = job.items.find(i => i.id === id);
+  if (!it) { toast(`${id} is no longer in the job`); return; }
+  if (!isShown(it)) {
+    shownLayers.add(C.layerOf(it));
+    toast(`${C.LAYER_LABELS[C.layerOf(it)]} layer shown so ${id} stays visible`);
+  }
+  selectedId = id;
+  if (it.wall === C.CEILING) view = 'PLAN';
+  else if (view !== 'PLAN' && view !== it.wall) view = it.wall;
+  if (multiIds) endMulti();
+  if (mode !== 'select') setMode('select');
+  inspectorCollapsed = false; // the type selector is the edit the route promises
+  if (PHONE.matches) layersOpen = false; // same phone panel-share rule as the toggle
+  renderAll();
+  $('#inspector').scrollTop = 0;
+}
+
 function openBreakdown() {
   const bd = C.breakdown(job);
   const box = el('div');
@@ -983,7 +1494,7 @@ function openBreakdown() {
     table.appendChild(tr);
   }
   box.appendChild(table);
-  box.appendChild(el('p', {}, bd.complete ? `Total ${C.formatPence(bd.totalPence)}` : `Total so far ${C.formatPence(bd.totalPence)} — incomplete, ${bd.unpricedCount} type${bd.unpricedCount > 1 ? 's' : ''} unpriced`));
+  box.appendChild(el('p', {}, bd.complete ? `Total ${C.formatPence(bd.totalPence)}` : `Total so far ${C.formatPence(bd.totalPence)} — incomplete, ${C.unpricedPhrase(bd.unpricedCount)}`));
   box.appendChild(el('p', { style: 'font-size:14px', 'data-testid': 'breakdown-scope' }, 'Whole job, all layers. Hiding layers on screen doesn’t change this.'));
   box.appendChild(el('p', { style: 'font-size:13px' }, 'Example labour rates only. Not a quotation or installation advice.'));
   modal('Labour breakdown', [box], [
@@ -1140,7 +1651,7 @@ function buildPrintPack(includeInk = true, layers = null) {
     t.appendChild(tr);
   }
   pL.appendChild(t);
-  pL.appendChild(el('p', {}, bd.complete ? `Total ${C.formatPence(bd.totalPence)}` : `Total so far ${C.formatPence(bd.totalPence)} — incomplete, ${bd.unpricedCount} unpriced`));
+  pL.appendChild(el('p', {}, bd.complete ? `Total ${C.formatPence(bd.totalPence)}` : `Total so far ${C.formatPence(bd.totalPence)} — incomplete, ${C.unpricedPhrase(bd.unpricedCount)}`));
   pL.appendChild(el('p', { class: 'disclaimer' }, 'Prototype with example labour rates only. Not a quotation, electrical design or installation advice. Cable and material costs are not included.'));
   pL.appendChild(el('p', { class: 'disclaimer' }, 'Tested with simulated pen and touch. Not yet tried on a real Surface; palm rejection unverified.'));
 
@@ -1200,6 +1711,7 @@ function openMenu() {
   const status = [$('#save-chip').textContent, $('#offline-chip').textContent, job.sample ? 'Sample job with example data' : 'Example rates only'];
   box.appendChild(el('p', { class: 'menu-status', 'data-testid': 'menu-status', style: 'font-size:14px;margin:0 0 8px' }, status.join(' · ')));
   const items = [
+    ...(hasRecovery() ? [['Recover unreadable saved data', () => { closeModal(); openRecovery(); }]] : []),
     ['New job', () => { closeModal(); confirmNewJob(); }],
     ['Room size', () => { closeModal(); openRoomForm(); }],
     ['Rates for this job', () => { closeModal(); openRates(); }],
@@ -1234,7 +1746,17 @@ function confirmNewJob() {
   modal('Start a new job', [el('p', {}, 'This replaces your current job. Download a backup first?')], [
     { label: 'Cancel', fn: closeModal },
     { label: 'Continue without backup', testid: 'newjob-nobackup', fn: () => { closeModal(); showStart(); } },
-    { label: 'Download and continue', class: 'btn-primary', fn: () => { downloadBackup(); closeModal(); showStart(); } },
+    {
+      // Fail closed (BL-05): if the backup didn't download, the current job
+      // must NOT be replaced. Stay on the modal; nothing has changed.
+      label: 'Download and continue', class: 'btn-primary', testid: 'newjob-download-continue', fn: () => {
+        if (!downloadBackup()) {
+          toast('New job not started — the backup of your current job didn’t download. Nothing has changed.');
+          return;
+        }
+        closeModal(); showStart();
+      },
+    },
   ]);
 }
 
@@ -1259,6 +1781,7 @@ function showStart() {
   $('#start-continue').hidden = !saved;
 }
 function beginJob(j) {
+  clearDrafts(); // a pending draft belongs to the job being left, never this one
   job = C.normaliseJob(j); history = []; redoStack = []; selectedId = null; view = 'PLAN'; zoom = { s: 1, tx: 0, ty: 0 }; multiIds = null; multiDraft = ''; multiPending = null;
   shownLayers = new Set(C.LAYERS); layersOpen = false;
   $('#start').hidden = true; $('#app').hidden = false;
@@ -1312,6 +1835,14 @@ $('#file-input').addEventListener('change', (e) => {
 });
 
 // ---- Pointer interaction --------------------------------------------------------------
+// EP19-05 (BL-09/10): finger selection needs a dead zone and a clear target.
+// Movement under TAP_SLOP_PX screen px is a tap (select, never a nudge); every
+// visible glyph is grabbable a little beyond its drawn symbol (HIT_SLOP_PX)
+// without enlarging anything visual; when two fittings are effectively at the
+// same spot the app asks which one was meant instead of guessing.
+const TAP_SLOP_PX = 10;    // movement below this (CSS px) is a tap, not a drag
+const HIT_SLOP_PX = 12;    // extra grab room around every symbol, screen px
+const AMBIGUOUS_PX = 14;   // candidates this close to the best hit are ambiguous
 const pointers = new Map(); // pointerId → {x,y,type}
 let dragFitting = null, drawingStroke = null, panning = null, pinch = null;
 let owner = null;               // pointerId that started the current drag, stroke or pan
@@ -1332,7 +1863,7 @@ function noteInput(e, outcome) {
 
 // Local-only drawing check shown in the Menu for support calls. Holds pointer
 // facts only, never job content, and is never sent anywhere.
-const BUILD_LABEL = 'Electrical layers update 2';
+const BUILD_LABEL = 'Electrical finger update 3';
 let downCount = 0;
 let lastDown = { id: null };
 function startDiag(e) {
@@ -1447,6 +1978,85 @@ function doPinch() {
   }
 }
 
+// Screen-space hit test over the drawn glyphs (EP19-05): every fitting shown on
+// this view is grabbable out to its symbol extent (largest glyph half-size,
+// 135 mm) plus HIT_SLOP_PX, with a floor so small drawings stay finger-sized.
+// Hidden fittings are not drawn, so they are never targets. Returns candidates
+// sorted nearest-first ({id, d}) and the symbol-core radius in screen px.
+function fittingHits(cx, cy) {
+  const svg = $('#canvas');
+  const world = svg.querySelector('#world');
+  const content = world && world.querySelector('g'); // the room/fitting layer
+  const none = { hits: [], core: 0 };
+  if (!content || !job) return none;
+  const ctm = content.getScreenCTM();
+  if (!ctm) return none;
+  const scale = Math.hypot(ctm.a, ctm.b) || 1; // screen px per room mm
+  const core = Math.max(10, 110 * scale);       // typical glyph half-size, floored
+  const radius = Math.max(24, 135 * scale) + HIT_SLOP_PX;
+  const out = [];
+  for (const g of svg.querySelectorAll('.fitting')) {
+    const id = g.getAttribute('data-id');
+    const it = job.items.find(i => i.id === id);
+    if (!it) continue;
+    const tr = (g.getAttribute('transform') || '').match(/translate\(\s*([-\d.]+)\s*[, ]\s*([-\d.]+)\s*\)/);
+    if (!tr) continue;
+    const pt = svg.createSVGPoint(); pt.x = +tr[1]; pt.y = +tr[2];
+    const s = pt.matrixTransform(ctm);
+    const d = Math.hypot(cx - s.x, cy - s.y);
+    if (d <= radius) out.push({ id, d });
+  }
+  out.sort((a, b) => a.d - b.d);
+  return { hits: out, core };
+}
+// Decide a hit list: a tap inside the nearest symbol's CORE is clearly that
+// fitting; an exact tie (overlapping fittings) or a slop-zone tap between two
+// nearby fittings is ambiguous and returns the candidate group instead. In an
+// ambiguous group, `chosen` (the fitting the user already selected, e.g. from
+// the chooser) is the target, so it can be dragged out of the group; nothing
+// else is ever guessed.
+function resolveHits(hits, core, chosen = null) {
+  if (!hits.length) return { id: null, cands: [] };
+  const near = hits.filter(h => h.d <= hits[0].d + AMBIGUOUS_PX).map(h => h.id);
+  const group = () => ({ id: near.includes(chosen) ? chosen : null, cands: near });
+  if (near.length > 1 && hits[1].d - hits[0].d < 3) return group();                  // exact overlap
+  if (hits[0].d <= core) return { id: hits[0].id, cands: [hits[0].id] };              // on the symbol
+  if (near.length > 1) return group();                                                // between two
+  return { id: hits[0].id, cands: [hits[0].id] };                                      // slop grab
+}
+// Dense groups (EP19-05): when fittings sit close together, ask which one was
+// meant. Choosing only selects — it never moves anything.
+function askWhichFitting(cands, choose, hint = '') {
+  const box = el('div');
+  box.appendChild(el('p', {}, `${cands.length} fittings are near this spot. Which one did you mean?`));
+  if (hint) box.appendChild(el('p', {}, hint));
+  for (const id of cands) {
+    const it = job.items.find(i => i.id === id);
+    if (!it) continue;
+    const current = !multiIds && id === selectedId;
+    const b = el('button', { class: 'which-row', 'data-testid': `which-${id}`, ...(current ? { 'aria-current': 'true' } : {}) },
+      `${id} · ${C.TYPES[it.type].label}${it.wall === C.CEILING ? ' · ceiling' : ' · Wall ' + it.wall}${current ? ' · selected now' : ''}`);
+    b.addEventListener('click', () => { closeModal(); choose(id); });
+    box.appendChild(b);
+  }
+  modal('Which fitting?', [box], [{ label: 'Cancel', class: 'btn-primary', testid: 'which-cancel', fn: closeModal }]);
+}
+// Where the finger grabbed, relative to the fitting's own position (room mm),
+// so a drag carries the fitting without snapping its centre under the finger.
+function grabOffsetFor(id, p) {
+  const it = job.items.find(i => i.id === id);
+  if (!it) return { dL: 0, dH: 0 };
+  if (view === 'PLAN') {
+    if (it.wall === C.CEILING) return { dL: p.x - it.fromLeftMm, dH: p.y - it.heightMm };
+    const wp = wallParamsFromPlan(p.x, p.y, it.wall);
+    return wp ? { dL: wp.fromLeft - it.fromLeftMm, dH: 0 } : { dL: 0, dH: 0 };
+  }
+  const { H } = roomMm();
+  // wall views store height as H−y, so the offset carries that sign: the
+  // fitting keeps its hold point while the finger moves either way
+  return { dL: p.x - it.fromLeftMm, dH: it.heightMm - (H - p.y) };
+}
+
 $('#canvas').addEventListener('pointerdown', (e) => {
   e.preventDefault();
   const canvas = $('#canvas');
@@ -1487,24 +2097,37 @@ $('#canvas').addEventListener('pointerdown', (e) => {
   const fingerOnly = e.pointerType === 'touch' && penSeen && (!fingerDraws || penNear());
   const p = svgPoint(e);
   if (!p) { noteInput(e, 'no-drawing'); return; } // room not set yet (e.g. blank job, room form dismissed)
-  const hitFitting = e.target.closest ? e.target.closest('.fitting') : null;
+  const { hits, core } = fittingHits(e.clientX, e.clientY);
+  const hitFitting = hits.length ? hits[0] : null;
   if (fingerOnly && (mode !== 'select' || hitFitting)) explainFingerPan();
 
   if (mode === 'select' && !fingerOnly) {
     if (multiIds) {
       // Multi mode: a tap toggles a fitting; empty space only pans and never
       // clears the selection. No dragFitting — moving happens through Apply or
-      // not at all.
-      if (hitFitting) multiPending = { id: hitFitting.getAttribute('data-id'), sx: e.clientX, sy: e.clientY };
-      else multiPending = null;
+      // not at all. An ambiguous tap asks which fitting was meant on lift.
+      multiPending = hits.length ? { hits, core, sx: e.clientX, sy: e.clientY } : null;
       panning = { sx: e.clientX, sy: e.clientY, tx: zoom.tx, ty: zoom.ty };
       owner = e.pointerId;
       noteInput(e, hitFitting ? 'multi-tap' : 'pan');
       return;
     }
     if (hitFitting) {
-      selectedId = hitFitting.getAttribute('data-id');
-      dragFitting = { id: selectedId, moved: false, pre: snapshot() };
+      const res = resolveHits(hits, core, selectedId);
+      // a dense spot selects nothing yet unless one of its fittings was already
+      // chosen — the chooser on lift names the fitting
+      selectedId = res.id;
+      // A tap-select arms a drag but nothing moves until the pointer travels
+      // TAP_SLOP_PX: a small wobble selects without nudging the fitting. The
+      // grab offset keeps the fitting where the finger took hold of it. A drag
+      // from an ambiguous spot moves only the chosen fitting; with no choice
+      // it is refused and the lift opens the chooser.
+      dragFitting = {
+        id: selectedId, moved: false, pre: snapshot(),
+        sx: e.clientX, sy: e.clientY, active: false,
+        grab: grabOffsetFor(selectedId, p),
+        cands: res.cands,
+      };
     } else {
       selectedId = null;
       panning = { sx: e.clientX, sy: e.clientY, tx: zoom.tx, ty: zoom.ty };
@@ -1593,20 +2216,36 @@ $('#canvas').addEventListener('pointermove', (e) => {
   const p = svgPoint(e);
   if (!p) return; // nothing drawable yet
   if (dragFitting) {
+    if (dragFitting.refused) return;
+    if (!dragFitting.active) {
+      // EP19-05: under TAP_SLOP_PX of travel this is still a tap — the fitting
+      // stays put. An ambiguous grab with no chosen fitting never becomes a
+      // drag: the pointer's lift opens the chooser instead.
+      if (Math.hypot(e.clientX - dragFitting.sx, e.clientY - dragFitting.sy) < TAP_SLOP_PX) return;
+      if (!dragFitting.id) {
+        dragFitting.refused = true;
+        toast(`${dragFitting.cands.length} fittings are near this spot — lift your finger and choose one, then drag it.`, 4000);
+        return;
+      }
+      if (dragFitting.cands.length > 1) toast(`Moving ${dragFitting.id} (the selected fitting)`);
+      dragFitting.active = true;
+    }
     const item = job.items.find(i => i.id === dragFitting.id);
     if (!item) { dragFitting = null; return; }
     const p2 = svgPoint(e);
     if (!p2) return;
+    // carry the fitting from where the finger grabbed it, not centre-under-finger
+    const t = { x: p2.x - dragFitting.grab.dL, y: p2.y - dragFitting.grab.dH };
     let changedToClamp = false;
     let newL = item.fromLeftMm, newH = item.heightMm;
     if (view === 'PLAN') {
       if (item.wall === C.CEILING) {
         const dims = roomMm();
-        newL = Math.max(0, Math.min(dims.W, Math.round(p2.x)));
-        newH = Math.max(0, Math.min(dims.D, Math.round(p2.y)));
+        newL = Math.max(0, Math.min(dims.W, Math.round(t.x)));
+        newH = Math.max(0, Math.min(dims.D, Math.round(t.y)));
       } else {
         // slide along the item's own wall only
-        const wp = wallParamsFromPlan(p2.x, p2.y, item.wall);
+        const wp = wallParamsFromPlan(t.x, t.y, item.wall);
         if (wp) {
           const maxL = C.maxFromLeft(job, item);
           if (wp.fromLeft > maxL) { wp.fromLeft = maxL; changedToClamp = true; }
@@ -1616,9 +2255,9 @@ $('#canvas').addEventListener('pointermove', (e) => {
     } else {
       const maxL = C.maxFromLeft(job, item);
       const maxH = C.maxHeight(job, item);
-      newL = Math.max(0, Math.min(maxL, Math.round(p2.x)));
-      if (item.wall !== C.CEILING) newH = Math.max(0, Math.min(maxH, roomMm().H - Math.round(p2.y)));
-      if (Math.round(p2.x) > maxL || (roomMm().H - Math.round(p2.y)) > maxH) changedToClamp = true;
+      newL = Math.max(0, Math.min(maxL, Math.round(t.x)));
+      if (item.wall !== C.CEILING) newH = Math.max(0, Math.min(maxH, roomMm().H - Math.round(t.y)));
+      if (Math.round(t.x) > maxL || (roomMm().H - Math.round(t.y)) > maxH) changedToClamp = true;
     }
     if (newL !== item.fromLeftMm || newH !== item.heightMm) dragFitting.moved = true; // no empty undo steps
     item.fromLeftMm = newL;
@@ -1657,18 +2296,36 @@ function endPointer(e) {
   if (e.pointerId !== owner) return;
   owner = null;
   if (multiPending) {
-    // A tap only counts if it moved less than 12 CSS px; longer drags were pans.
+    // A tap only counts if it moved less than TAP_SLOP_PX; longer presses were
+    // pans. Two fittings at the same spot ask which one was meant.
     const pend = multiPending;
     multiPending = null;
-    if (Math.hypot(e.clientX - pend.sx, e.clientY - pend.sy) < 12) {
-      const it = job.items.find(i => i.id === pend.id);
-      if (it && it.wall === C.CEILING) toast(`${pend.id} is a ceiling fitting, so it has no wall height. Not added.`);
-      else if (it) multiIds = multiIds.includes(pend.id) ? multiIds.filter(x => x !== pend.id) : [...multiIds, pend.id];
+    if (Math.hypot(e.clientX - pend.sx, e.clientY - pend.sy) < TAP_SLOP_PX) {
+      const { id, cands } = resolveHits(pend.hits, pend.core);
+      const toggle = (tid) => {
+        const it = job.items.find(i => i.id === tid);
+        if (it && it.wall === C.CEILING) toast(`${tid} is a ceiling fitting, so it has no wall height. Not added.`);
+        else if (it) multiIds = multiIds.includes(tid) ? multiIds.filter(x => x !== tid) : [...multiIds, tid];
+        renderAll();
+      };
+      if (id) toggle(id);
+      else askWhichFitting(cands, toggle); // chooser rerenders through its own click
     }
     renderAll();
     return;
   }
   if (dragFitting) {
+    if (!dragFitting.moved && dragFitting.cands.length > 1) {
+      // A tap on a dense spot, or a refused drag: ask instead of guessing
+      // (never moves anything). A tap also lets an earlier choice be changed.
+      const { cands, refused } = dragFitting;
+      dragFitting = null;
+      askWhichFitting(cands, (id) => {
+        selectedId = id; renderAll();
+        toast(`${id} selected — drag from this spot to move it`);
+      }, refused ? 'Choose one, then drag it.' : '');
+      return;
+    }
     if (dragFitting.moved) {
       // one history entry for the whole drag (snapshot taken before it started)
       history.push(dragFitting.pre);
@@ -1773,10 +2430,11 @@ $('#btn-job-name').addEventListener('click', () => {
   const nameI = el('input', { 'data-testid': 'job-name-input' }); nameI.value = job.name;
   box.append(el('label', {}, 'Job name'), nameI);
   const save = () => commit(() => { job.name = nameI.value.trim().slice(0, C.LIMITS.maxTextLen) || 'Untitled room'; });
-  modal('Job details', [box], [
+  const initialName = nameI.value;
+  guardedForm('Job details', [box], [
     { label: 'Cancel', fn: closeModal },
     { label: 'Save', class: 'btn-primary', fn: () => { save(); closeModal(); } },
-  ]);
+  ], () => nameI.value !== initialName, 'You have edited the job name.');
 });
 $('#btn-zoom-in').addEventListener('click', () => { zoom.s = Math.min(4, zoom.s * 1.25); renderCanvas(); });
 $('#btn-zoom-out').addEventListener('click', () => { zoom.s = Math.max(0.5, zoom.s / 1.25); renderCanvas(); });
@@ -1784,25 +2442,55 @@ $('#btn-zoom-fit').addEventListener('click', () => { zoom = { s: 1, tx: 0, ty: 0
 
 document.addEventListener('keydown', (e) => {
   const inField = e.target.matches('input, textarea, select');
+  if (e.key === 'Escape' && discardConfirmEl) {
+    // on the Keep editing / Throw away question itself: back to the form
+    closeDiscardConfirm();
+    return;
+  }
   if (e.key === 'Escape' && layersOpen && !$('#modal-root').firstChild) {
     setLayersOpen(false);
     $('#btn-layers').focus({ preventScroll: true });
     return;
   }
   if (e.key === 'Escape' && inField) {
-    // In a dialog: close it (nothing typed there is kept without Save).
+    // In a dialog: an implicit close; an edited guarded form asks first.
     // In the details panel: blur, which commits the field through its change handler.
-    if (e.target.closest('#modal-root')) closeModal(); else e.target.blur();
+    if (e.target.closest('#modal-root')) requestCloseModal(); else e.target.blur();
+    return;
+  }
+  if (inField && e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'z' && e.target.closest('#inspector')) {
+    // Ctrl+Z inside a details-panel field is the app's undo, never the
+    // browser's per-field text undo: one intentional typing session is the
+    // unit. Before the session committed, the first press discards the
+    // typing (no history step); after it committed, one press undoes the
+    // whole session. An explicit second press then reaches earlier edits.
+    e.preventDefault();
+    const d = draft;
+    if (d && d.elem === e.target && d.dirty && !(session && session.key === d.key && session.pushed)) {
+      discardDraft(d);
+      return;
+    }
+    if (d && d.elem !== e.target) flushDraft();
+    undo();
     return;
   }
   if (inField) return;
+  if ($('#modal-root').firstChild) {
+    // An open modal owns the keyboard: app-level shortcuts (undo/redo, Delete
+    // of the selected fitting, mode keys) must never modify the job behind it
+    // — focus is often on a modal BUTTON, which is not a field. Fields inside
+    // the modal returned above and keep their native editing. Escape on a
+    // modal button still closes implicitly (an edited guarded form asks).
+    if (e.key === 'Escape') requestCloseModal();
+    return;
+  }
   if (e.ctrlKey && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
   else if ((e.ctrlKey && e.key.toLowerCase() === 'y') || (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'z')) { e.preventDefault(); redo(); }
   else if (e.key === 'Delete' && selectedId) { commit(() => { job.items = job.items.filter(i => i.id !== selectedId); }); toast(`${selectedId} deleted · Undo`); selectedId = null; renderAll(); }
   else if (e.key === 'Escape') {
-    if (PHONE.matches && !$('#modal-root').firstChild) inspectorCollapsed = true;
+    if (PHONE.matches) inspectorCollapsed = true;
     endMulti(); // Escape outside a field cancels multi mode with no change
-    selectedId = null; closeModal(); renderAll();
+    selectedId = null; renderAll();
   }
   else if (e.key.toLowerCase() === 'v') setMode('select');
   else if (e.key.toLowerCase() === 'p') setMode('place');
@@ -1866,5 +2554,24 @@ if ('serviceWorker' in navigator) {
 buildPalette();
 setMode('select');
 renderFingerMode();
-const savedJob = loadSaved();
-if (savedJob) beginJob(savedJob); else showStart();
+// Boot: a readable saved job opens as before. An unreadable one is quarantined
+// (never replaced) and the recovery UI opens — now and on every later reload
+// until every preserved copy is explicitly deleted (downloading alone clears
+// nothing, by design).
+const storedAtBoot = readStored();
+if (storedAtBoot.status === 'ok') {
+  beginJob(storedAtBoot.job);
+  // preserved unreadable copies still need attention: offer recovery on every
+  // boot until each one is explicitly deleted
+  if (recoverySlots().length) openRecovery();
+} else if (storedAtBoot.status === 'unreadable') {
+  if (!quarantineUnreadable(storedAtBoot.raw)) recoveryPendingMain = storedAtBoot.raw;
+  showStart();
+  openRecovery();
+} else if (storedAtBoot.status === 'blocked') {
+  showStart();
+  toast('This device’s storage is blocked, so any saved job can’t be read. Nothing has been changed.');
+} else {
+  showStart();
+  if (recoverySlots().length) openRecovery();
+}

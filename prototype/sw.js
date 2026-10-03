@@ -1,6 +1,6 @@
 // Service worker: cache only this app's own assets, relative to this file,
 // so the app works offline after one successful load under any subdirectory.
-const CACHE = 'surface-proto-v6-bulkheight20261003';
+const CACHE = 'surface-proto-v10-finger-20261003';
 const CACHE_PREFIX = 'surface-proto-';
 // Precache real files only. './' (the directory URL) is deliberately excluded:
 // addAll is atomic and a directory response can vary by server, which would
