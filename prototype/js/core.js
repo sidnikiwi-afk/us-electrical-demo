@@ -87,6 +87,31 @@ export function placeItem(job, type, wall, fromLeftMm, heightMm, notes = '') {
   return id;
 }
 
+// "Place like this": a new fitting with the template's type and layer and a
+// blank note. The layer is stored only when it differs from the type default.
+// Checks the layer before placing, so every throw leaves the job untouched.
+export function placeLike(job, template, wall, fromLeftMm, heightMm) {
+  const layer = template?.layer ?? null;
+  if (layer !== null && !isLayer(layer)) throw new Error(`unknown layer "${String(layer).slice(0, 40)}"`);
+  const id = placeItem(job, template?.type, wall, fromLeftMm, heightMm, '');
+  if (layer !== null && layer !== defaultLayerFor(template.type)) job.items[job.items.length - 1].layer = layer;
+  return id;
+}
+
+// The next fitting ID is always one more than the highest ever issued in the
+// job, so undo and redo keep the larger counter and an ID is never reissued.
+export function monotonicNextId(restored, current) {
+  return Math.max(restored.nextId, current.nextId);
+}
+
+// A wall height kept inside [0, ceiling]. `clamped` says whether it changed.
+export function clampWallHeight(job, heightMm) {
+  const max = ceilingHeightMm(job.room);
+  if (!max) return { heightMm: Math.round(heightMm), clamped: false }; // no ceiling height entered yet
+  const h = Math.max(0, Math.min(Math.round(heightMm), max));
+  return { heightMm: h, clamped: heightMm < 0 || heightMm > max };
+}
+
 export function wallLengthMm(room, wall) {
   if (!room.widthM || !room.depthM) return 0;
   return (wall === 'A' || wall === 'C') ? Math.round(room.widthM * 1000) : Math.round(room.depthM * 1000);

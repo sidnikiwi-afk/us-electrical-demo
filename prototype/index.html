@@ -24,6 +24,15 @@
     </span>
     <button id="btn-menu" title="Menu" aria-label="Menu">⋯<span class="btn-text"> Menu</span></button>
   </header>
+  <div id="job-banner" class="job-banner" data-testid="job-banner" role="status" hidden>
+    <span id="job-banner-text" data-testid="job-banner-text"></span>
+    <span id="job-banner-actions" class="job-banner-actions"></span>
+  </div>
+  <div id="quote-bar" data-testid="quote-bar" role="region" aria-label="Labour total">
+    <span id="quote-summary"></span>
+    <span class="spacer"></span>
+    <button id="btn-breakdown" aria-haspopup="dialog">Show breakdown ▾</button>
+  </div>
 
   <div id="main">
     <nav id="mode-rail" aria-label="Modes">
@@ -67,12 +76,6 @@
       <!-- injected -->
     </aside>
   </div>
-
-  <footer id="quote-bar" data-testid="quote-bar">
-    <span id="quote-summary"></span>
-    <span class="spacer"></span>
-    <button id="btn-breakdown">Show breakdown ▲</button>
-  </footer>
 </div>
 
 <!-- Start screen -->
@@ -84,8 +87,8 @@
     <button id="start-blank" data-testid="start-blank">Start a blank room</button>
     <button id="start-sample" data-testid="start-sample">Open barber-shop sample</button>
     <button id="start-layers-demo" data-testid="start-layers-demo">Try layers demo (made-up workshop)</button>
-    <button id="start-continue" data-testid="start-continue" hidden>Carry on with current job</button>
-    <button id="start-import">Import a backup</button>
+    <button id="start-continue" data-testid="start-continue" hidden>Open a saved job</button>
+    <button id="start-import">Import a backup as a new job</button>
   </div>
 </div>
 

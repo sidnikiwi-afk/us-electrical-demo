@@ -16,11 +16,17 @@ This is a practice tool with an invented barber shop and example labour prices. 
 9. Once the page says offline is ready, disconnect and reopen it. Use the same browser and address.
 10. Open the labour breakdown, download the CSV and print the plan and wall views.
 
-The prototype keeps one current job in this browser. Download backups for safekeeping or to move between devices. It does not sync to other devices. Real iPad/Pencil and Surface pen feel and palm rejection still need hands-on testing. Materials, cable calculations, circuit design and electrical compliance are outside this prototype.
+The prototype keeps up to 20 jobs in this browser on this device. Tap the job name at the top to open Jobs, where you can switch job, rename the open one or download all jobs. Download backups for safekeeping or to move between devices. It does not sync to other devices. Real iPad/Pencil and Surface pen feel and palm rejection still need hands-on testing. Materials, cable calculations, circuit design and electrical compliance are outside this prototype.
 
 If the old Details button remains after an update, refresh once more. Keep using the same browser and address so your saved job stays available.
 
-If finger drawing still does not work, select Draw and try one line, then open Menu. The Drawing check at the bottom shows the version and what happened to your touch. It stays on your device. The latest version says “Electrical finger update 3”.
+If finger drawing still does not work, select Draw and try one line, then open Menu. The Drawing check at the bottom shows the version and what happened to your touch. It stays on your device. This version says "Electrical jobs update 1".
+
+## Going back to the older version
+
+Before you go back, remember that the old version can open only one job; download all jobs first. In Jobs, tap Download all jobs and keep the file. If you then work on a job in the older version, download a backup of it from Menu before you update again. After the update, Jobs offers to add that changed job as a new one.
+
+Jobs stay in this browser only. Prices are examples, and a fitting with no rate shows as unpriced. The app has only been tested with simulated touch and pen, not on a real iPad, iPhone or Surface.
 
 ## Give several fittings the same height
 

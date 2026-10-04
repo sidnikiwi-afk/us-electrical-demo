@@ -35,6 +35,10 @@ button:disabled { opacity: .4; cursor: default; }
 .pal-btn { width: 100px; flex: 0 0 auto; display: flex; flex-direction: column; gap: 3px; align-items: center; padding: 6px; font-size: 13px; min-height: 64px; }
 .pal-btn .sym { font-size: 18px; font-weight: 700; }
 .pal-btn.active { background: #dce7ff; border-color: #23324d; }
+/* "Place like this": the strip says what is being copied and keeps Cancel touch sized */
+.copy-bar { display: flex; align-items: center; gap: 12px; font-size: 15px; padding: 4px; }
+.copy-cancel-btn { flex: 0 0 auto; min-height: 44px; min-width: 88px; }
+.place-like-btn { display: block; width: 100%; min-height: 44px; margin: 4px 0 2px; }
 
 #centre { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 #view-tabs { display: flex; gap: 4px; padding: 6px 8px 0; flex-wrap: wrap; }
@@ -165,17 +169,21 @@ button.q-chip { border: 0; font: inherit; color: inherit; cursor: pointer; }
   #place-palette { right: min(320px, 40vw); }
 }
 
-/* Tablet and desktop: "Hide details" retracts the drawer to a narrow strip on
-   the right holding only "Show details"; the canvas takes the freed width.
-   This is the complement of the phone query below. */
+/* Tablet and desktop (layout A, canvas first): details open as a drawer on
+   the right. "Hide details" folds them into a 52px strip under the drawing
+   holding the panel title, "Show details" and Done. The strip is its own grid
+   row, so it never sits on top of a fitting, and the drawing takes the whole
+   width. This is the complement of the phone query below. */
 @media (min-width: 601px) and (min-height: 501px) {
-  #inspector { flex-shrink: 0; transition: width .18s ease-out; }
-  body.inspector-collapsed #inspector { width: 64px; padding: 8px; overflow: hidden; }
+  #main { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: minmax(0, 1fr) auto; --fold-h: 52px; }
+  #centre { grid-column: 1; grid-row: 1 / span 2; min-height: 0; }
+  #inspector { grid-column: 2; grid-row: 1 / span 2; min-height: 0; border-radius: 12px 0 0 12px; box-shadow: -2px 0 10px rgba(20,30,50,.12); }
+  body.inspector-collapsed #centre { grid-row: 1; }
+  body.inspector-collapsed #inspector { grid-column: 1 / span 2; grid-row: 2; width: auto; height: var(--fold-h); padding: 4px 8px 4px 12px; overflow: hidden; border-left: 0; border-top: 1px solid #c4ccd8; border-radius: 0; box-shadow: 0 -2px 8px rgba(20,30,50,.08); }
   body.inspector-collapsed .inspector-head { margin: 0; }
-  body.inspector-collapsed .inspector-head h2, body.inspector-collapsed .inspector-done { display: none; }
-  body.inspector-collapsed #btn-inspector-toggle { writing-mode: vertical-rl; width: 48px; min-height: 140px; padding: 12px 0; }
+  body.inspector-collapsed .inspector-head h2 { font-size: 15px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #place-palette { transition: right .18s ease-out; }
-  body.inspector-collapsed #place-palette { right: 64px; }
+  body.inspector-collapsed #place-palette { right: 0; bottom: var(--fold-h); }
   /* Place mode: the drawing and the bottom-left hint stop above the fitting strip */
   #place-palette:not([hidden]) ~ #centre #canvas-wrap { padding-bottom: var(--palette-h); }
   #place-palette:not([hidden]) ~ #centre #hint { margin-bottom: var(--palette-h); }
@@ -340,3 +348,81 @@ button.q-chip { border: 0; font: inherit; color: inherit; cursor: pointer; }
 /* EP19-05 dense-spot chooser: one full-width button per candidate fitting so
    close-together fittings are told apart by ID, type and wall, not position. */
 .which-row { display: block; width: 100%; margin: 6px 0; text-align: left; padding: 8px 12px; }
+
+/* EP21-02 several jobs: read-only / not-saved banner under the top bar, and
+   one card per job in Menu → Jobs. */
+.job-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 10px; background: #fdf3d7; border-bottom: 1px solid #d9c47a; font-size: 14px; }
+.job-banner[hidden] { display: none; }
+.job-banner-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.job-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 0; padding: 8px 10px; border: 1px solid #d5d9e0; border-radius: 8px; }
+.job-row p { margin: 0; flex: 1 1 12em; }
+
+/* EP21-UI layout A, canvas first, tablet and desktop. The mode rail becomes a
+   floating tool dock over the drawing's left margin, below the Layers button.
+   The canvas keeps an 84px left gutter under the dock, so no fitting or wall
+   label is ever drawn under a tool. --tabs-h is the measured height of the
+   view tabs (ui.js syncFooterHeight). Phones keep their own rail and sheet
+   layout above, which already gives the drawing the screen. */
+@media (min-width: 601px) and (min-height: 501px) {
+  #main { --dock-top: calc(var(--tabs-h, 50px) + 60px); --dock-bottom: 8px; }
+  /* filtered: Layers and "Show all" wrap to two rows, as for the hint */
+  #main:has(#btn-layers-reset:not([hidden])) { --dock-top: calc(var(--tabs-h, 50px) + 116px); }
+  #main:has(#place-palette:not([hidden])) { --dock-bottom: calc(var(--palette-h) + 8px); }
+  /* the folded details strip is a grid row the dock must also clear */
+  body.inspector-collapsed #main { --dock-bottom: calc(var(--fold-h) + 8px); }
+  body.inspector-collapsed #main:has(#place-palette:not([hidden])) { --dock-bottom: calc(var(--palette-h) + var(--fold-h) + 8px); }
+  #mode-rail { position: absolute; left: 8px; top: var(--dock-top); z-index: 3; width: 72px; max-height: calc(100% - var(--dock-top) - var(--dock-bottom)); gap: 4px; padding: 6px; background: #fff; border-radius: 14px; box-shadow: 0 4px 16px rgba(20,30,50,.2); }
+  #mode-rail .mode-btn { flex: 0 0 auto; height: 56px; min-height: 56px; }
+  .rail-extra { margin-top: 2px; padding-top: 6px; border-top: 1px solid #d5dbe4; }
+  #canvas-wrap { padding-left: 84px; }
+  #hint { left: 92px; }
+  /* the Layers list opens beside the dock instead of under it */
+  #layers-panel { left: 76px; width: min(320px, calc(100cqw - 92px)); }
+  #place-palette { left: 0; border-radius: 0 12px 0 0; }
+  #view-tabs { gap: 6px; padding: 6px 8px 4px; }
+  #view-tabs button { border-radius: 999px; border-color: #c4ccd8; }
+}
+
+/* Layout A, every size: the labour total sits at the top under the job name,
+   as a dark pill that stays readable; a missing price is an amber flag beside it. */
+#quote-bar { min-height: 52px; padding: 4px 10px; background: #f3f5f9; color: #1a1a1a; border-bottom: 1px solid #c4ccd8; }
+#quote-bar.incomplete { background: #fdf6e3; }
+#quote-bar button { background: #fff; color: #23324d; border-color: #23324d; }
+#quote-bar .q-chip { background: #e3e8f0; }
+#quote-bar .q-total { background: #23324d; color: #fff; font-weight: 700; font-size: 16px; padding: 4px 12px; border-radius: 999px; }
+#quote-bar.incomplete .q-total { background: #8a5a00; }
+#quote-bar .q-warn { background: #fff3cd; color: #5c3b00; border: 1px solid #b26a00; padding: 3px 10px; }
+/* One short line on every screen: price flag, total and breakdown button.
+   Counts, the missing-ID list and existing fittings live in the breakdown and
+   the room panel (their text stays in the DOM for the quote checks). The flag
+   and the scope chip shrink with an ellipsis before the bar would grow. */
+#quote-bar { flex-wrap: nowrap; }
+#quote-summary { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: nowrap; overflow: hidden; align-items: center; column-gap: 6px; }
+#quote-bar .q-count, #quote-bar .q-priced, #quote-bar .q-existing, #quote-bar .q-detail, #quote-bar .q-long { display: none; }
+#quote-bar .q-chip { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; margin: 0; }
+#quote-bar .q-warn { order: -1; min-width: 7em; font-weight: 700; }
+#quote-bar .q-total { flex: 0 0 auto; }
+#btn-breakdown { flex: 0 0 auto; min-height: 44px; padding: 0 10px; }
+@media (max-width: 600px), (max-height: 500px) {
+  #quote-bar { min-height: 0; padding: 2px 8px; }
+  #quote-bar .q-total { font-size: 15px; padding: 2px 10px; background: #23324d; border-radius: 999px; }
+  #quote-bar.incomplete .q-total { background: #8a5a00; }
+  #quote-bar .q-warn { padding: 2px 8px; background: #fff3cd; border-radius: 10px; }
+  /* the details sheet scrolls with a finger and keeps the scroll to itself */
+  #inspector { touch-action: pan-y; overscroll-behavior: contain; }
+}
+/* Phone landscape (layout A): rail, drawing and details side by side, so the
+   details never sit on the drawing. Open: a right column. Folded: a 56px
+   column holding only "Show details". The html/body/#main prefixes outrank
+   the older floating-pill rules above. */
+@media (max-height: 500px) and (orientation: landscape) {
+  #main { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-rows: minmax(0, 1fr) auto; grid-template-areas: "rail centre sheet" "rail palette sheet"; }
+  html body #main #inspector:not([hidden]) { grid-area: sheet; position: static; inset: auto; width: min(340px, 45vw); max-width: none; max-height: none; overflow-y: auto; padding: 0 10px 10px; border: 0; border-left: 2px solid #23324d; border-radius: 0; box-shadow: none; z-index: auto; }
+  /* "Set height for several" keeps its full header (count chip, Cancel), so
+     it stays a normal column while folded */
+  html body.inspector-collapsed #main #inspector:not([hidden]):not(:has(.multi-head)) { width: 56px; padding: 6px; overflow: hidden; }
+  html body.inspector-collapsed #main #inspector:not(:has(.multi-head)) .inspector-head { margin: 0; }
+  html body.inspector-collapsed #main #inspector:not(:has(.multi-head)) .inspector-head h2,
+  html body.inspector-collapsed #main #inspector:not(:has(.multi-head)) .inspector-done { display: none; }
+  html body.inspector-collapsed #main #inspector:not(:has(.multi-head)) #btn-inspector-toggle { writing-mode: vertical-rl; width: 44px; min-width: 44px; min-height: 120px; padding: 8px 0; }
+}

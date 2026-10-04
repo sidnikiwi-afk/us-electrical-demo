@@ -1,14 +1,18 @@
 // Service worker: cache only this app's own assets, relative to this file,
 // so the app works offline after one successful load under any subdirectory.
-const CACHE = 'surface-proto-v10-finger-20261003';
+const CACHE = 'surface-proto-v12-jobs-review-20261004';
 const CACHE_PREFIX = 'surface-proto-';
 // Precache real files only. './' (the directory URL) is deliberately excluded:
 // addAll is atomic and a directory response can vary by server, which would
 // abort the whole install and stop the worker from ever becoming ready.
-const ASSETS = ['./index.html', './css/style.css', './js/ui.js', './js/core.js', './manifest.webmanifest'];
+const ASSETS = ['./index.html', './css/style.css', './js/ui.js', './js/core.js', './js/jobs.js', './manifest.webmanifest'];
 
+// cache: 'reload' goes past the browser's HTTP cache, so a long max-age can't
+// put an older file into a new version's cache. Still all-or-nothing.
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE)
+    .then((c) => c.addAll(ASSETS.map((a) => new Request(a, { cache: 'reload' }))))
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {

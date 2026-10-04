@@ -55,9 +55,8 @@ The service worker caches the app for offline use after the first online visit.
 
 ## Checks
 
-The current version passed 57 data tests, 28 browser journeys, 66 focused layers
-checks, 131 Set-height-for-several browser checks and an 11-point offline cache
-upgrade check.
+Test counts change between builds, so this file doesn't list them. The release
+notes for each build say what was checked and what wasn't.
 This download contains the runnable app and guide; development test tools and
 internal review records are kept separately. The print pack fits four A4 sheets:
 plan, walls A+B, walls C+D, and labour breakdown.
@@ -77,7 +76,7 @@ refresh before the new layout appears; saved jobs stay in the same browser.
 
 The Draw tool accepts wider finger contacts when no pen is active, and Clear
 sketches keeps the current tool selected. Menu includes a local Drawing check
-with build “Electrical finger update 3” and the last input result. It contains no job
+with the build name (currently "Electrical jobs update 1") and the last input result. It contains no job
 content and sends nothing to a server. Browser-injected touch checks supplement
 the earlier synthetic-event tests; actual iPad confirmation is still needed.
 
@@ -94,6 +93,40 @@ Not complete / known limits: no real iPad or Surface hardware testing (simulated
 and touch only), no multi-room jobs, no cloud sync (by design); the print pack
 fits four A4 sheets (verified via `pdftoppm` renders) but its legibility on
 physical paper has not been reviewed by a human.
+
+## Jobs on this device
+
+Current build: Electrical jobs update 1. Menu shows it under Drawing check.
+
+The app keeps up to 20 jobs in this browser on this device. Nothing is sent to
+a server and nothing syncs, so another browser or device has its own list. Tap
+the job name at the top to open Jobs: switch job, rename the open one, start a
+new one or download all jobs as one file. Menu also has Jobs.
+
+Prices are example labour rates. A fitting without a rate stays unpriced and
+the total says it is incomplete. The app doesn't guess a price for it.
+
+If a room has no ceiling height yet, wall heights can't be set above 0 mm and
+Set height for several asks for the room size first. The app doesn't assume a
+ceiling height. Enter the room height to place fittings at a real height.
+
+## Rolling back to the older version
+
+Before you roll back, read this: the old version can open only one job; download all jobs first.
+
+1. Open Jobs and tap Download all jobs. Keep that file. It holds every readable
+   job and can be imported back into this version later.
+2. Roll back. The older version opens one job only, the one it had before the
+   upgrade (or the last one it saved).
+3. If you do new work while on the older version, download a backup of that
+   job from its Menu before you upgrade again. The older version can't see the
+   other jobs, so the all-jobs file is your copy of them.
+4. After upgrading again, open Jobs. If the older version changed its job, the
+   app offers to add it as a new job; your other jobs stay as they were.
+
+This is a prototype. It has been tested in desktop browsers with simulated pen
+and touch on tablet and phone screen sizes. That isn't the same as testing on
+a real iPad, iPhone or Surface, which still needs doing.
 
 ## Electrical layers
 

@@ -1,9 +1,38 @@
 // Browser UI for the Surface drawing-to-labour prototype.
 // Plain ES modules, no dependencies, no outbound requests.
 import * as C from './core.js';
+import * as J from './jobs.js';
 
-const STORAGE_KEY = 'surface.job.v1';
 const NS = 'http://www.w3.org/2000/svg';
+
+// ---- Several jobs (EP21-02) ------------------------------------------------
+// The open job lives in its own record (jobs.js). The older single-job key is
+// read only. access says what this tab may do with the open record:
+//   edit      — this tab holds the job's owner lock and saves normally
+//   other-tab — another tab is editing it: changes stay on screen, never saved
+//   stale     — another tab saved it after we opened it: we never write again
+//   fallback  — no Web Locks/SubtleCrypto: nothing is written but rescues
+//   unsaved   — the open job has no record here (e.g. the job list is full)
+//   switching — between jobs; nothing saves
+const TEST_HOOKS = window.__SURFACE_TEST__ || {}; // set only by synthetic tests
+const writerTab = 'T' + [...crypto.getRandomValues(new Uint8Array(6))].map(b => b.toString(16).padStart(2, '0')).join('');
+let jobsApi = null;
+let lockSupport = false;
+let access = 'switching';
+let currentId = null;     // record of the open job, null if it has none
+let lastKnownRev = 0;     // writeRev this tab last read or wrote
+let jobPrefs = J.cleanPrefs(null);
+let ownerLock = null;
+let savedCanon = null;    // contentKey() known to be in storage (null: none)
+// What a save would store, minus savedAt/revision: unchanged content is never rewritten.
+const contentKey = () => J.canonical(job) + '\u0000' + JSON.stringify(jobPrefs);
+let openToken = 0;        // bumps on every open, so late save results never cross jobs
+let legacyOffer = null;   // older-version job waiting for "add it as a new job"
+let legacyMarkerUnreadable = false; // §4.1 skip: the older-version job is listed in Recover, download only
+let accessNote = '';      // why an 'unsaved' job has no record
+let staleCause = 'unknown'; // why access is 'stale': 'other-tab', 'own' (our save wasn't confirmed) or 'unknown'
+let rescueFullWarned = false;
+let refusedNumber = null; // an invalid number refused when its field lost focus; blocks the next switch once
 
 // ---- State ---------------------------------------------------------------
 let job = null;
@@ -17,13 +46,18 @@ let multiIds = null;
 let multiDraft = '';
 let multiPending = null;
 let placeType = 'surface';
+// "Place like this": {type, heightMm, layer, from} captured once from the
+// selected fitting, or null. Each tap in Place places one copy.
+let copyTpl = null;
 let history = [];               // JSON snapshots (undo), limit 50
 let redoStack = [];
 let penSeen = false;
 let zoom = { s: 1, tx: 0, ty: 0 };
 // Must match the phone media queries in style.css.
 const PHONE = window.matchMedia('(max-width: 600px), (max-height: 500px)');
-let inspectorCollapsed = PHONE.matches; // phones start with details closed so the drawing gets the screen
+let inspectorCollapsed = true; // layout A: every screen starts with details folded so the drawing gets the space
+let lastDetailsId = null;       // fitting the details panel last showed (unfold on a new pick)
+let lastInspectorKey = '';      // which panel was last rendered (scroll kept across same-panel rebuilds)
 let pendingRoom = null;         // room values awaiting shrink decision
 // Layer visibility is view state only: never saved, reset to all on job open.
 let shownLayers = new Set(C.LAYERS);
@@ -37,6 +71,43 @@ function revealLayerOf(id) {
   if (!it || isShown(it)) return null;
   shownLayers.add(C.layerOf(it));
   return C.LAYER_LABELS[C.layerOf(it)];
+}
+
+// ---- Copy mode and remembered placement (§4.8) ------------------------------
+// Prefs are per job, never undone, and go out with the job's normal save.
+function rememberType(type) {
+  jobPrefs = J.cleanPrefs({ ...jobPrefs, lastType: type });
+}
+function rememberHeight(type, wall, heightMm) {
+  if (wall === C.CEILING) return; // a ceiling fitting's heightMm is a plan position
+  jobPrefs = J.cleanPrefs({ ...jobPrefs, heights: { ...jobPrefs.heights, [type]: heightMm } });
+}
+function startCopy(item) {
+  copyTpl = { type: item.type, heightMm: item.heightMm, layer: C.isLayer(item.layer) ? item.layer : null, from: item.id };
+  placeType = item.type;
+  rememberType(item.type);
+  inspectorCollapsed = PHONE.matches; // phones need the drawing to tap on
+  setMode('place');
+  buildPalette();
+  renderAll();
+}
+// Leaves copy mode with nothing added. Returns whether it was on.
+function endCopy() {
+  if (!copyTpl) return false;
+  copyTpl = null;
+  buildPalette();
+  return true;
+}
+function cancelCopy() {
+  if (!endCopy()) return;
+  toast('Stopped placing copies. Nothing was added.');
+  renderAll();
+}
+function copyLabel() {
+  const t = copyTpl;
+  return t.type === 'downlight'
+    ? `Copying ${t.from} (${C.TYPES[t.type].label}). Tap the ceiling in the plan view for each one.`
+    : `Copying ${t.from} (${C.TYPES[t.type].label}, ${t.heightMm} mm). Tap the wall for each one.`;
 }
 
 // ---- Set height for several -------------------------------------------------
@@ -119,8 +190,10 @@ function undo() {
   clearDrafts(); // an uncommitted draft dies with the state it belonged to
   if (!history.length) return;
   const prevRevision = job.revision;
+  const current = job;
   redoStack.push(snapshot());
   job = C.normaliseJob(JSON.parse(history.pop()));
+  job.nextId = C.monotonicNextId(job, current); // never reissue a fitting ID
   selectedId = job.items.some(i => i.id === selectedId) ? selectedId : null;
   job.revision = Math.max(job.revision, prevRevision) + 1; // never reuse a revision number
   renderAll(); scheduleSave();
@@ -129,8 +202,10 @@ function redo() {
   clearDrafts();
   if (!redoStack.length) return;
   const prevRevision = job.revision;
+  const current = job;
   history.push(snapshot());
   job = C.normaliseJob(JSON.parse(redoStack.pop()));
+  job.nextId = C.monotonicNextId(job, current);
   selectedId = job.items.some(i => i.id === selectedId) ? selectedId : null;
   job.revision = Math.max(job.revision, prevRevision) + 1;
   renderAll(); scheduleSave();
@@ -171,6 +246,7 @@ function clearDrafts() {
 // Register input in one field. A draft in a DIFFERENT field commits first,
 // so quick field-to-field typing cannot drop the earlier edit.
 function setDraft(d) {
+  refusedNumber = null; // typing again supersedes an earlier refused number
   if (draft && draft.key !== d.key) flushDraft();
   draft = d;
   clearTimeout(draftTimer);
@@ -197,6 +273,8 @@ function flushDraft() {
   if (!d || !job || !d.valid) { if (d && !d.valid) draft = d; return d; }
   const t = d.target.kind === 'job' ? job : job.items.find(i => i.id === d.target.id);
   if (!t) return d; // its fitting is gone (deleted/replaced): the draft dies with it
+  // a valid wall height becomes this type's remembered height (E20)
+  if (d.target.kind === 'item' && d.target.field === 'heightMm') rememberHeight(t.type, t.wall, d.value);
   if (t[d.target.field] === d.value) { saveNow(); return d; } // same-value input: nothing stored, no undo step
   const pre = snapshot();
   t[d.target.field] = d.value;
@@ -239,106 +317,249 @@ function discardDraft(d) {
   }
   saveNow(); // chip back to the honest stored state
 }
-// Leaving the page: valid drafts go in and save NOW (storage is synchronous);
-// invalid drafts are simply not stored. This assists the debounce — the
-// debounce, not this handler, is the main mechanism.
-window.addEventListener('pagehide', () => {
+// Leaving the page: valid drafts go in; invalid drafts are simply not stored.
+// A locked save is async and may not finish before the page dies, so unsaved
+// content first goes to this page's own rescue key (synchronous, no lock),
+// then the normal save is requested; a successful save removes the rescue.
+// The debounce, not this handler, is the main mechanism, and nothing here can
+// guarantee persistence if the system kills the tab.
+window.addEventListener('pagehide', (e) => {
   if (!job) return;
   flushDraft();
   clearTimeout(saveTimer);
-  saveNow();
+  if (jobsApi && contentKey() !== savedCanon) {
+    // no dialog is possible here; rescue-full was surfaced while the page was active
+    const kept = jobsApi.writeRescue({ writerTab, jobId: currentId, baseRev: currentId ? lastKnownRev : null, job });
+    if (!kept.ok) rescueFullWarned = false; // warn again if this page comes back from the cache
+  }
+  if (access === 'edit') saveNow();
+  // a page kept in the back/forward cache must not keep others from editing
+  if (e.persisted) releaseOwner();
+});
+window.addEventListener('pageshow', async (e) => {
+  if (e.persisted) warnIfRescueFull();
+  if (!e.persisted || !currentId || !lockSupport || TEST_HOOKS.noOwnerLock || ownerLock) return;
+  if (access !== 'edit' && access !== 'other-tab') return;
+  const token = openToken;
+  const o = await jobsApi.acquireOwner(currentId);
+  await (saveFollowUp || saving); // the pagehide save may still be settling
+  // Resume only if nothing changed meanwhile and the stored revision is still the one we know.
+  if (token !== openToken || ownerLock || (access !== 'edit' && access !== 'other-tab')) { if (o) o.release(); return; }
+  if (o) {
+    const r = jobsApi.readJob(currentId);
+    if (!r.ok || r.env.writeRev !== lastKnownRev) {
+      o.release();
+      access = 'stale';
+      staleCause = r.ok ? causeOf(r.env.writerTab) : 'unknown';
+      showAccessState();
+      return;
+    }
+  }
+  ownerLock = o;
+  access = o ? 'edit' : 'other-tab';
+  showAccessState();
+});
+// Who wrote the stored revision we didn't expect.
+function causeOf(storedWriter) {
+  if (storedWriter && storedWriter === writerTab) return 'own';
+  return storedWriter ? 'other-tab' : 'unknown';
+}
+// Surface a full Recover list while the app is active: pagehide can't ask.
+function warnIfRescueFull() {
+  if (!jobsApi || !job || contentKey() === savedCanon) return;
+  if (jobsApi.rescueRoom(writerTab)) { rescueFullWarned = false; return; }
+  if (rescueFullWarned) return;
+  rescueFullWarned = true;
+  toast(`Recover already holds ${J.MAX_RESCUES} kept copies, so unsaved changes here won’t be kept if this page closes. Open Menu → Recover saved data, download one and dismiss it.`);
+}
+// Another tab wrote the job open here: this copy is out of date and must
+// never be saved over it. (Our own writes never fire this event.)
+window.addEventListener('storage', (e) => {
+  if (!currentId || e.key !== J.JOB_PREFIX + currentId) return;
+  if (access === 'edit') { access = 'stale'; staleCause = 'other-tab'; showAccessState(); }
+  else if (access === 'other-tab') showAccessState('The other tab has saved changes.');
 });
 
 // ---- Storage (honest failures) ---------------------------------------------
 let saveTimer = null;
 function scheduleSave() { clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, 400); }
+// Saves are async (they wait for the job's lock) and resolve {ok, reason}.
+// A save asked for while one is running is coalesced into ONE follow-up save,
+// which every later caller shares.
+let saving = null;
+let saveFollowUp = null;
 function saveNow() {
+  if (!saving) {
+    saving = runSave().catch(() => ({ ok: false, reason: 'Not saved. Something went wrong while saving.' }))
+      .finally(() => { saving = null; });
+    return saving;
+  }
+  if (!saveFollowUp) saveFollowUp = saving.then(() => { saveFollowUp = null; return saveNow(); });
+  return saveFollowUp;
+}
+function setChip(cls, text, onclick = null) {
   const chip = $('#save-chip');
+  chip.className = cls ? `chip ${cls}` : 'chip';
+  chip.textContent = text;
+  chip.onclick = onclick;
+}
+const NOT_SAVED_BACKUP = 'Not saved — storage full or blocked. Tap to download a backup.';
+async function runSave() {
+  if (!job) return { ok: true };
   // A save that lands while a newer edit is still being typed must not stamp
   // over the typing/invalid chip state — not on entry, and especially not
   // with a false "Saved" on exit.
   const pendingDraft = draft && draft.dirty ? draft : null;
-  if (!pendingDraft) { chip.className = 'chip'; chip.textContent = 'Saving…'; }
-  let text;
   try {
-    text = C.serialiseJob({ ...job, savedAt: new Date().toISOString() });
+    C.serialiseJob({ ...job, savedAt: new Date().toISOString() });
   } catch (err) {
     // The record itself failed validation — say that, never "storage full".
     if (String(err.message).includes('room')) {
-      chip.className = 'chip warn';
-      chip.textContent = 'Not saved yet — set the room size first';
-    } else {
-      chip.className = 'chip err';
-      chip.textContent = `Not saved — job record problem (${String(err.message).slice(0, 60)}…). Keep this screen open.`;
+      setChip('warn', 'Not saved yet — set the room size first');
+      return { ok: false, reason: 'This job can’t be saved until it has a room size.' };
     }
-    chip.onclick = null;
-    return;
+    setChip('err', `Not saved — job record problem (${String(err.message).slice(0, 60)}…). Keep this screen open.`);
+    return { ok: false, reason: `This job can’t be saved: ${err.message}.` };
   }
-  try {
-    // Never silently overwrite an unreadable saved record. If the main key
-    // still holds one (quarantine failed or was bypassed), try to move it
-    // aside; if that also fails (storage blocked or all recovery slots full),
-    // refuse to save and offer the raw download.
-    let existing = null;
-    let existingReadFailed = false;
-    try { existing = localStorage.getItem(STORAGE_KEY); }
-    catch { existingReadFailed = true; }
-    if (existingReadFailed) {
-      // Failure to inspect the saved record must fail closed: whatever is in
-      // the main key — possibly an unreadable job needing recovery — is never
-      // overwritten by a save that could not check it.
-      chip.className = 'chip err';
-      chip.textContent = 'Not saved — this device’s storage would not let us check the saved job, so nothing was overwritten. Tap to download a backup.';
-      chip.onclick = () => downloadBackup();
-      toast('Your job is still on screen but not saved: the saved job in this device’s storage could not be read, so saving stopped rather than risk replacing it. Download a backup, then retry.');
-      return;
-    }
-    let existingBad = null;
-    if (existing) {
-      const r = C.parseBackup(existing); // never throws
-      if (!r.ok) existingBad = existing;
-    }
-    if (existingBad !== null && !quarantineUnreadable(existingBad)) {
-      recoveryPendingMain = existingBad;
-      chip.className = 'chip err';
-      chip.textContent = 'Not saved — an unreadable saved job is still in storage. Tap to download it.';
-      chip.onclick = () => { downloadRawRecord(existingBad); toast('Download started — check your Downloads folder and keep it somewhere safe.'); };
-      toast('Your job is on screen but not saved: an unreadable saved job still occupies this device’s storage and could not be moved aside. Download it from Menu → Recover unreadable saved data, delete it there, then try again.');
-      return;
-    }
-    if (existingBad !== null) recoveryPendingMain = null;
-    localStorage.setItem(STORAGE_KEY, text);
-    // "Saved" only means saved: read the record back and compare before the
-    // chip is allowed to claim persistence.
-    let readBack = null;
-    try { readBack = localStorage.getItem(STORAGE_KEY); } catch { /* checked below */ }
-    if (readBack !== text) throw new Error('stored copy did not read back identically');
-    job.savedAt = JSON.parse(text).savedAt; // in step with what was actually saved
+  if (access !== 'edit') {
+    // Nothing is written from this tab. Unchanged content is still safe.
+    const clean = savedCanon !== null && contentKey() === savedCanon;
+    if (!pendingDraft) showAccessState();
+    if (!clean) warnIfRescueFull();
+    return clean ? { ok: true, reason: 'unchanged' } : { ok: false, reason: accessReason(), canLeave: true };
+  }
+  const canon = contentKey();
+  if (canon === savedCanon) {
+    // already stored exactly: no write, so other tabs see no change
+    if (pendingDraft) { if (pendingDraft.valid) chipTyping(); else chipInvalidDraft(); }
+    else setChip('ok', 'Saved on this device');
+    return { ok: true, reason: 'unchanged' };
+  }
+  if (!pendingDraft) setChip('', 'Saving…');
+  const token = openToken;
+  const r = await jobsApi.save({ jobId: currentId, job, prefs: jobPrefs, baseRev: lastKnownRev, writerTab });
+  if (token !== openToken) return r; // the job was switched meanwhile: this result belongs to the old record
+  if (r.ok) {
+    lastKnownRev = r.writeRev;
+    savedCanon = canon;
+    job.savedAt = r.savedAt; // in step with what was actually saved
+    jobsApi.clearRescue(writerTab);
     if (pendingDraft) {
       // stored fine, but a newer edit is still uncommitted in a field: say
       // that honestly instead of claiming Saved over it
       if (pendingDraft.valid) chipTyping(); else chipInvalidDraft();
-      return;
+    } else if (contentKey() !== canon) {
+      setChip('', 'Saving…'); // a newer edit landed while this one was saved; its save is queued
+    } else {
+      const time = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+      setChip('ok', `Saved on this device · ${time}`);
     }
-    const time = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-    chip.className = 'chip ok';
-    chip.textContent = `Saved on this device · ${time}`;
-    chip.onclick = null;
-  } catch (err) {
-    // Genuine storage failure: job stays on screen; offer a backup download.
-    chip.className = 'chip err';
-    chip.textContent = 'Not saved — storage full or blocked. Tap to download a backup.';
-    chip.onclick = () => downloadBackup();
-    toast('This device’s storage is full or blocked. Your job is still on screen — download a backup.');
+    return { ok: true };
+  }
+  const failed = saveFailed(r);
+  warnIfRescueFull();
+  return failed;
+}
+// Honest failure states. The job stays on screen and nothing else changes.
+function saveFailed(r) {
+  switch (r.reason) {
+    case 'stale':
+      // writeRev protection stays: a stale tab never writes again
+      access = 'stale';
+      staleCause = causeOf(r.storedWriter);
+      showAccessState();
+      return { ok: false, reason: accessReason(), canLeave: true };
+    case 'read-failed':
+      setChip('err', 'Not saved — this device’s storage would not let us check the saved job, so nothing was overwritten. Tap to download a backup.', () => downloadBackup());
+      toast('Your job is still on screen but not saved: the saved job could not be read, so saving stopped rather than risk replacing it. Download a backup, then retry.');
+      return { ok: false, reason: 'The saved copy of this job couldn’t be read, so nothing was overwritten.' };
+    case 'unreadable':
+      setChip('err', 'Not saved. The saved copy of this job can’t be read, so it was left as it is. Tap to download a backup.', () => downloadBackup());
+      return { ok: false, reason: 'The saved copy of this job can’t be read. It was left as it is; download a backup or save this as a new job.' };
+    case 'missing':
+      setChip('err', 'Not saved. This job’s saved record has gone from this device. Tap to download a backup.', () => downloadBackup());
+      return { ok: false, reason: 'This job’s saved record has gone from this device. Download a backup or save this as a new job.' };
+    case 'lock-timeout':
+      setChip('err', 'Not saved. Another tab kept this job busy. Tap to download a backup.', () => downloadBackup());
+      return { ok: false, reason: 'Another tab kept this job busy, so it wasn’t saved. Try again in a moment.' };
+    case 'too-large':
+      setChip('err', 'Not saved. This job is too large to store on this device. Tap to download a backup.', () => downloadBackup());
+      return { ok: false, reason: 'This job is too large to store on this device. Download a backup.' };
+    case 'readback':
+      // the write may have landed; it just couldn't be checked
+      setChip('err', 'Not confirmed. This device didn’t give back what was just saved, so we can’t say the job is stored. Tap to download a backup.', () => downloadBackup());
+      toast('Your job is still on screen. This device may have stored it, but reading it back didn’t match, so it isn’t confirmed. Download a backup, then retry.');
+      return { ok: false, reason: 'This device didn’t give back what was just saved, so the save isn’t confirmed. Download a backup before leaving.' };
+    default: // quota, blocked
+      setChip('err', NOT_SAVED_BACKUP, () => downloadBackup());
+      toast('This device’s storage is full or blocked. Your job is still on screen — download a backup.');
+      return { ok: false, reason: 'This device’s storage is full or blocked, so the job wasn’t saved. Nothing else changed.' };
   }
 }
-function loadSaved() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const r = C.parseBackup(raw);
-    return r.ok ? r.job : null;
-  } catch { return null; }
+function accessReason() {
+  if (access === 'other-tab') return 'This job is open for editing in another tab, so changes here aren’t saved.';
+  if (access === 'stale') return staleText().reason;
+  if (access === 'fallback') return 'This browser can’t safely save jobs on this device, so changes here aren’t saved.';
+  return 'This job isn’t saved on this device.';
+}
+// Only claim "another tab" when the stored record says another tab wrote it.
+function staleText() {
+  if (staleCause === 'other-tab') return {
+    chip: 'Changed in another tab — not saved',
+    banner: 'This job was changed in another tab, so this version wasn’t saved.',
+    reason: 'Changed in another tab — not saved. This version is still on screen.',
+  };
+  if (staleCause === 'own') return {
+    chip: 'Not saved — last save not confirmed',
+    banner: 'This device didn’t confirm the last save, so this version wasn’t saved over it.',
+    reason: 'This device didn’t confirm the last save, so nothing more was saved. This version is still on screen.',
+  };
+  return {
+    chip: 'Saved copy changed — not saved',
+    banner: 'The saved copy of this job changed after it was opened here, so this version wasn’t saved.',
+    reason: 'The saved copy changed after it was opened here, so this version wasn’t saved. It’s still on screen.',
+  };
+}
+
+// The chip and banner always say what this tab can do with the open job.
+function showAccessState(extra = '') {
+  const banner = $('#job-banner');
+  const acts = $('#job-banner-actions');
+  acts.innerHTML = '';
+  const btn = (label, testid, fn) => {
+    const b = el('button', { 'data-testid': testid }, label);
+    b.addEventListener('click', fn);
+    acts.appendChild(b);
+  };
+  let text = '';
+  if (access === 'edit') {
+    if (savedCanon !== null && contentKey() === savedCanon) setChip('ok', 'Saved on this device');
+  } else if (access === 'other-tab') {
+    setChip('warn', 'Read-only: open for editing in another tab');
+    text = `Open for editing in another tab. Changes here aren’t saved. ${extra}`.trim();
+    btn('Download backup', 'banner-download', () => downloadBackup());
+    if (jobsApi.canWrite) btn('Save a copy as new job', 'banner-save-new', () => saveCopyAsNew());
+    btn('Reload saved version', 'banner-reload', () => confirmReloadSaved());
+  } else if (access === 'stale') {
+    const st = staleText();
+    setChip('err', st.chip, () => $('#job-banner').scrollIntoView({ block: 'nearest' }));
+    text = st.banner;
+    btn('Download this version', 'banner-download', () => downloadBackup());
+    btn('Save this version as new job', 'banner-save-new', () => saveCopyAsNew());
+    btn('Reload saved version', 'banner-reload', () => confirmReloadSaved());
+  } else if (access === 'fallback') {
+    setChip('err', 'Not saved: download a backup', () => downloadBackup());
+    // wording quoted by the spec (§4.4)
+    text = 'This browser can’t safely save several jobs on this device. Changes stay on screen — download a backup.';
+    btn('Download backup', 'banner-download', () => downloadBackup());
+  } else if (access === 'unsaved') {
+    setChip('err', 'Not saved: download a backup', () => downloadBackup());
+    text = `This job isn’t saved on this device. ${extra || accessNote}`.trim();
+    btn('Download backup', 'banner-download', () => downloadBackup());
+  }
+  banner.hidden = !text;
+  $('#job-banner-text').textContent = text;
+  syncFooterHeight();
 }
 
 // ---- Unreadable saved data (BL-04) ----------------------------------------
@@ -348,21 +569,11 @@ function loadSaved() {
 // record: download it, or explicitly delete that one record. Downloading starts
 // a browser download only — it does not prove a file was kept, and it clears
 // nothing: the copy stays until it is explicitly deleted.
+// EP21-02: these older-version slots are only listed and deleted here; the
+// new storage never writes them, and the older-version key itself is never
+// moved, removed or overwritten (an unreadable one is offered as Download only).
 const RECOVERY_PREFIX = 'surface.job.unreadable.';
-const RECOVERY_MAX = 3; // bounded: beyond this, saving fails closed instead
-function readStored() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { status: 'empty' };
-    const r = C.parseBackup(raw);
-    return r.ok ? { status: 'ok', job: r.job } : { status: 'unreadable', raw, errors: r.errors };
-  } catch (err) {
-    // reading storage itself threw (blocked/private mode): say so, don't claim "empty"
-    return { status: 'blocked', errors: [String(err && err.message || err)] };
-  }
-}
-// Every preserved unreadable record still in storage. key null means the record
-// is stuck in the MAIN key because the quarantine copy could not be written.
+const RECOVERY_MAX = 3;
 function recoverySlots() {
   const out = [];
   for (let i = 1; i <= RECOVERY_MAX; i++) {
@@ -373,34 +584,67 @@ function recoverySlots() {
   }
   return out;
 }
-// In-memory record for the rare case the quarantine copy could not be written:
-// download and delete must still be offered, and the Menu entry must show.
-let recoveryPendingMain = null; // raw text of the unreadable record in STORAGE_KEY
+// Everything Recover lists: older-version slots, an unreadable older-version
+// record, unreadable job records, rescued pages and incomplete imports.
 function recoveryAll() {
-  return [...recoverySlots(), ...(recoveryPendingMain ? [{ key: null, raw: recoveryPendingMain }] : [])];
+  const out = recoverySlots().map(r => ({ kind: 'slot', ...r }));
+  if (!jobsApi) return out;
+  const L = jobsApi.peekLegacy();
+  if (L.status === 'unreadable') out.push({ kind: 'legacy', key: J.LEGACY_KEY, raw: L.raw });
+  else if (L.status === 'ok' && legacyMarkerUnreadable) out.push({ kind: 'legacy-kept', key: J.LEGACY_KEY, raw: L.raw });
+  const s = jobsApi.safeScan();
+  if (s) {
+    for (const j of s.jobs) if (!j.ok) out.push({ kind: 'job', key: j.key, raw: j.raw, reason: j.reason });
+    for (const r of s.rescues) if (r.writerTab !== writerTab) out.push({ kind: 'rescue', key: r.key, raw: r.raw, data: r.data });
+    for (const i of s.imports) out.push({ kind: 'import', key: i.key, raw: i.raw, data: i.data });
+  }
+  return out;
 }
 function hasRecovery() { return recoveryAll().length > 0; }
-// Move an unreadable record aside (copy to a free recovery key, then remove the
-// original) so normal saving can never overwrite it. Never overwrites a
-// different preserved copy; with no free slot it fails closed and leaves the
-// original in the main key (the save guard then refuses to replace it).
-function quarantineUnreadable(raw) {
-  const slots = recoverySlots();
-  if (slots.some(s => s.raw === raw)) {
-    // already preserved (e.g. a re-run): just clear the main-key original
-    try { localStorage.removeItem(STORAGE_KEY); } catch { /* guard still protects it */ }
-    return true;
-  }
-  const used = new Set(slots.map(s => s.key));
-  let free = null;
-  for (let i = 1; i <= RECOVERY_MAX; i++) { const k = RECOVERY_PREFIX + i + '.v1'; if (!used.has(k)) { free = k; break; } }
-  if (!free) return false; // fail closed: no copy is overwritten or dropped
-  try { localStorage.setItem(free, raw); } catch { return false; }
-  try { localStorage.removeItem(STORAGE_KEY); } catch { /* copy is safe; the guard still protects the original */ }
-  return true;
+// Dismissing kept changes deletes them, so Download is offered first.
+function confirmDismissRescue(rec) {
+  modal('Dismiss these kept changes?', [
+    el('p', {}, 'This removes only this copy of unsaved changes from this device. It can’t be undone, so download it first if you might need it.'),
+  ], [
+    { label: 'Keep it', testid: 'rescue-keep', fn: () => openRecovery() },
+    { label: 'Download this copy', testid: 'rescue-download', fn: () => { downloadRawRecord(rec.raw); toast('Download started. Check your Downloads folder.'); } },
+    {
+      label: 'Dismiss copy', class: 'btn-danger', testid: 'rescue-dismiss-confirm', fn: () => {
+        if (!jobsApi.dismissRescue(rec.key)) {
+          openRecovery();
+          toast('Not dismissed. This device’s storage refused, so the copy is still there.');
+          return;
+        }
+        if (hasRecovery()) openRecovery(); else closeModal();
+        toast('Kept changes dismissed. Nothing else changed.');
+      },
+    },
+  ]);
 }
-function downloadRawRecord(raw) {
-  download(`unreadable-saved-job-${stamp()}.json`, raw, 'application/json');
+// An unreadable import record: only that record goes, and only once confirmed.
+// Jobs the import already added are complete and stay.
+function confirmDismissJournal(rec) {
+  modal('Dismiss this import record?', [
+    el('p', {}, 'This removes only this unreadable import record from this device. Jobs already added stay in your list. It can’t be undone, so download it first if you might need it.'),
+  ], [
+    { label: 'Cancel', testid: 'journal-keep', fn: () => openRecovery() },
+    { label: 'Download this record', testid: 'journal-download', fn: () => { downloadRawRecord(rec.raw); toast('Download started. Check your Downloads folder.'); } },
+    {
+      label: 'Dismiss record', class: 'btn-danger', testid: 'journal-dismiss-confirm', fn: () => {
+        if (!jobsApi.dismissJournal(rec.key)) {
+          openRecovery();
+          toast('Not dismissed. This device’s storage refused, so the record is still there.');
+          return;
+        }
+        if (hasRecovery()) openRecovery(); else closeModal();
+        toast('Import record dismissed. Nothing else changed.');
+      },
+    },
+  ]);
+}
+function downloadRawRecord(raw, name = 'unreadable-saved-job') {
+  if (raw === null || raw === undefined) { toast('That record couldn’t be read from this device’s storage, so there’s nothing to download.'); return; }
+  download(`${name}-${stamp()}.json`, raw, 'application/json');
 }
 // Plain-language reason for an unreadable record (parseBackup never throws).
 function recoveryReason(raw) {
@@ -412,23 +656,7 @@ function recoveryReason(raw) {
 // Delete exactly this one record, wherever it lives. Verifies the removal
 // before reporting success; never touches any other key.
 function deleteRecoveryRecord(rec) {
-  if (rec.key === null) {
-    // still in the MAIN key (quarantine failed earlier): remove only if the
-    // main key still holds exactly this record, never a newer valid save
-    let cur;
-    try { cur = localStorage.getItem(STORAGE_KEY); }
-    catch { return false; } // can't even read: not deleted; keep the pending reference
-    if (cur === rec.raw) {
-      try { localStorage.removeItem(STORAGE_KEY); } catch { /* checked below */ }
-      try { cur = localStorage.getItem(STORAGE_KEY); }
-      catch { return false; } // removal can't be verified: not deleted; keep the pending reference
-      if (cur === rec.raw) return false; // still there: not deleted
-    } else {
-      return false; // a different (e.g. newer valid) record: never delete it or claim success
-    }
-    recoveryPendingMain = null;
-    return true;
-  }
+  if (rec.kind !== 'slot' || !rec.key.startsWith(RECOVERY_PREFIX)) return false; // only older-version slots can be deleted
   try { localStorage.removeItem(rec.key); } catch { /* checked below */ }
   let after;
   try { after = localStorage.getItem(rec.key); } catch { after = 'unread'; }
@@ -438,18 +666,71 @@ function openRecovery() {
   const records = recoveryAll();
   if (!records.length) { toast('No unreadable saved data left on this device.'); return; }
   const box = el('div');
-  box.appendChild(el('p', {}, `${records.length === 1 ? 'A job' : `${records.length} jobs`} saved on this device couldn’t be read. Each copy is kept exactly as it was, so nothing is lost.`));
-  box.appendChild(el('p', { style: 'font-size:14px' }, 'Downloading starts a download of the copy — check it lands in your Downloads folder and keep it somewhere safe. A download clears nothing: a copy stays until you delete it. Deleting removes only that one unreadable record; it never touches other data.'));
+  box.appendChild(el('p', {}, `${records.length === 1 ? 'One item needs' : `${records.length} items need`} a look. Each is kept exactly as it was, so nothing is lost.`));
+  box.appendChild(el('p', { style: 'font-size:14px' }, 'Downloading starts a download. Check it lands in your Downloads folder and keep it somewhere safe. A download doesn’t remove anything from this list.'));
   const list = el('div');
+  if (legacyOffer) {
+    // Recover opens first at boot, so the older-version offer stays reachable from here
+    const row = el('div', { class: 'recovery-row', 'data-testid': 'recovery-legacy-offer' });
+    row.appendChild(el('p', {}, `Older-version job found: “${legacyOffer.job.name}”. It isn’t in your job list yet.`));
+    const b = el('button', { 'data-testid': 'recovery-legacy-review' }, 'Review older-version job');
+    b.addEventListener('click', () => { closeModal(); showLegacyOffer(); });
+    row.appendChild(b);
+    list.appendChild(row);
+  }
   for (const [i, rec] of records.entries()) {
-    const row = el('div', { class: 'recovery-row', 'data-testid': `recovery-row-${i}` });
-    const p = el('p', {}, `Copy ${i + 1} of ${records.length}: ${recoveryReason(rec.raw)}${rec.key === null ? ' — still in the main saved-job slot (this device’s storage refused to move it aside)' : ''}.`);
+    const row = el('div', { class: 'recovery-row', 'data-testid': `recovery-row-${i}`, 'data-kind': rec.kind });
     const btns = el('div', { class: 'recovery-row-actions' });
     const dl = el('button', { class: 'btn-primary', 'data-testid': `recovery-download-${i}` }, 'Download this copy');
     dl.addEventListener('click', () => {
-      downloadRawRecord(rec.raw);
-      toast('Download started — check your Downloads folder. The copy stays listed here until you delete it.');
+      downloadRawRecord(rec.raw, rec.kind === 'legacy-kept' ? 'older-version-job' : undefined);
+      toast('Download started. Check your Downloads folder; the copy stays listed here.');
     });
+    if (rec.kind !== 'slot') {
+      let text;
+      if (rec.kind === 'legacy') text = `Older-version record (unreadable): ${recoveryReason(rec.raw)}. It’s kept as it is. Download only.`;
+      else if (rec.kind === 'legacy-kept') text = 'Older-version job, not added to your jobs because its upgrade record can’t be read. Both are kept as they are. Download only.';
+      else if (rec.kind === 'job') text = `Unreadable job: ${rec.reason}. It’s kept as it is and still counts towards the ${J.MAX_JOBS}-job limit.`;
+      else if (rec.kind === 'rescue') {
+        text = rec.data
+          ? `Unsaved changes kept when a page closed: “${rec.data.job.name}”, ${rec.data.at ? new Date(rec.data.at).toLocaleString('en-GB') : 'time unknown'}.`
+          : 'Unsaved changes kept when a page closed, but they can’t be read.';
+      } else {
+        text = rec.data
+          ? `Incomplete import: added ${rec.data.done.length} of ${rec.data.planned.length} jobs before it stopped. Jobs already added are complete.`
+          : 'Incomplete import record that can’t be read.';
+      }
+      row.appendChild(el('p', {}, text));
+      if (rec.kind === 'rescue' && rec.data) {
+        const open = el('button', { 'data-testid': `recovery-open-${i}` }, 'Open as new job');
+        open.addEventListener('click', () => { closeModal(); openRescueAsNew(rec.key); });
+        btns.appendChild(open);
+      }
+      if (rec.kind === 'import' && rec.data) {
+        const retry = el('button', { 'data-testid': `recovery-retry-${i}` }, 'Retry (choose the file again)');
+        retry.addEventListener('click', () => { closeModal(); $('#file-input').click(); });
+        const dismiss = el('button', { 'data-testid': `recovery-dismiss-${i}` }, 'Dismiss');
+        dismiss.addEventListener('click', () => {
+          if (!jobsApi.dismissJournal(rec.key)) toast('Not dismissed. This device’s storage refused.');
+          if (hasRecovery()) openRecovery(); else closeModal();
+        });
+        btns.append(retry, dismiss);
+      } else btns.appendChild(dl);
+      if (rec.kind === 'import' && !rec.data) {
+        const dismiss = el('button', { 'data-testid': `recovery-dismiss-${i}` }, 'Dismiss');
+        dismiss.addEventListener('click', () => confirmDismissJournal(rec));
+        btns.appendChild(dismiss);
+      }
+      if (rec.kind === 'rescue') {
+        const dismiss = el('button', { 'data-testid': `recovery-dismiss-${i}` }, 'Dismiss');
+        dismiss.addEventListener('click', () => confirmDismissRescue(rec));
+        btns.appendChild(dismiss);
+      }
+      row.appendChild(btns);
+      list.appendChild(row);
+      continue;
+    }
+    const p = el('p', {}, `Older-version unreadable copy: ${recoveryReason(rec.raw)}.`);
     const del = el('button', { class: 'btn-danger', 'data-testid': `recovery-delete-${i}` }, 'Delete this copy');
     del.addEventListener('click', () => {
       modal('Delete this unreadable copy?', [
@@ -475,7 +756,7 @@ function openRecovery() {
     list.appendChild(row);
   }
   box.appendChild(list);
-  modal('Saved job couldn’t be read', [box], [
+  modal('Recover saved data', [box], [
     { label: 'Close', class: 'btn-primary', testid: 'recovery-close', fn: closeModal },
   ]);
 }
@@ -791,11 +1072,12 @@ function renderCanvas() {
     const sel = svg.querySelector(`.fitting[data-id="${selectedId}"]`);
     if (sel) { const r = svgEl('rect', { x: -180, y: -180, width: 360, height: 360, fill: 'none', stroke: '#2266cc', 'stroke-width': 40 }); sel.insertBefore(r, sel.firstChild); }
   }
-  const placeLayerHidden = !shownLayers.has(C.defaultLayerFor(placeType));
+  const placeLayer = copyTpl ? (copyTpl.layer ?? C.defaultLayerFor(copyTpl.type)) : C.defaultLayerFor(placeType);
+  const placeLayerHidden = !shownLayers.has(placeLayer);
   $('#hint').textContent = multiIds ? 'Tap fittings to add or remove them, then enter one height.' : {
     select: 'Tap a fitting to select it. Drag to move.',
-    place: C.TYPES[placeType].label + (placeType === 'downlight' ? ' — tap the ceiling in the plan view.' : ' — tap on the wall where the fitting goes.')
-      + (placeLayerHidden ? ` Its layer (${C.LAYER_LABELS[C.defaultLayerFor(placeType)]}) is hidden and will be shown when you place it.` : ''),
+    place: (copyTpl ? copyLabel() : C.TYPES[placeType].label + (placeType === 'downlight' ? ' — tap the ceiling in the plan view.' : ' — tap on the wall where the fitting goes.'))
+      + (placeLayerHidden ? ` Its layer (${C.LAYER_LABELS[placeLayer]}) is hidden and will be shown when you place it.` : ''),
     draw: 'Sketches are notes only, shared by all layers. They are never priced.',
     notes: 'Tap to add a note. Notes are shared by all layers.',
   }[mode];
@@ -908,7 +1190,12 @@ function renderTabs() {
     }
     const b = el('button', { 'data-view': d.v, 'data-testid': `tab-${d.v}`, class: view === d.v ? 'active' : '' }, d.label);
     if (d.title) b.title = d.title;
-    b.addEventListener('click', () => { view = d.v; renderAll(); });
+    b.addEventListener('click', () => {
+      view = d.v;
+      // a copied downlight can only go on the ceiling in the plan view
+      if (copyTpl && copyTpl.type === 'downlight' && view !== 'PLAN' && endCopy()) toast('Stopped placing copies. Downlights can only be copied in the plan view.');
+      renderAll();
+    });
     tabs.appendChild(b);
   }
 }
@@ -1110,6 +1397,10 @@ function inspectorMultiPanel() {
     commit(() => { res = C.setWallHeights(job, multiIds, h); }); // throws before changing anything on a stale ID
     if (!res) return; // commit already toasted the failure; job untouched
     const { heightMm, count } = res;
+    for (const id of multiIds) {
+      const it = job.items.find(i => i.id === id);
+      if (it) rememberHeight(it.type, it.wall, heightMm);
+    }
     multiIds = null; multiDraft = ''; // leave multi mode and clear the selection before the final render
     renderAll();
     toast(`Height set to ${heightMm} mm on ${count} fitting${count === 1 ? '' : 's'} · Undo`);
@@ -1136,6 +1427,13 @@ function renderInspector() {
   head.append(el('h2', {}, `${item.id} · ${C.TYPES[item.type].label}`), toggle, done);
   box.appendChild(head);
   if (inspectorCollapsed) return;
+
+  const like = el('button', { class: 'place-like-btn', 'data-testid': 'ins-place-like' }, 'Place like this');
+  like.addEventListener('click', () => startCopy(item));
+  box.appendChild(like);
+  box.appendChild(el('p', { class: 'field-note' }, item.wall === C.CEILING
+    ? 'Each tap adds a copy with the same type and layer where you tap. Notes start blank.'
+    : 'Each tap adds a copy with the same type, height and layer. Notes start blank.'));
 
   const label = (txt) => box.appendChild(el('label', {}, txt));
   const typeSel = el('select', { 'data-testid': 'ins-type' });
@@ -1220,6 +1518,7 @@ function renderInspector() {
       // keep displaying a value the job refused.
       if (!read().valid) {
         errP.hidden = false;
+        refusedNumber = { text: text.toLowerCase(), value: input.value };
         input.value = item[key];
         draft = null; // the refused value is resolved together with its field
         saveNow(); // the chip returns to the honest stored state
@@ -1297,10 +1596,28 @@ function renderAll() {
   updateHistoryButtons();
   $('#sample-chip').hidden = !job.sample;
   $('#btn-job-name').textContent = job.name;
+  $('#btn-job-name').setAttribute('aria-label', `Jobs. Open now: ${job.name}`);
   // A hidden fitting can't stay selected: it could be moved or deleted unseen.
   const sel = job.items.find(i => i.id === selectedId);
   if (!sel || !isShown(sel)) selectedId = null;
+  // Tablet/desktop (layout A): picking a different fitting unfolds its details.
+  // Phones keep the folded sheet header so the drawing stays tappable, and Place
+  // mode never resizes the drawing between taps.
+  // Not while a pointer is still down on the fitting: unfolding resizes the
+  // drawing mid-gesture and the drag would land far from the finger. The lift's
+  // renderAll unfolds it instead.
+  if (!dragFitting) {
+    if (selectedId && selectedId !== lastDetailsId && mode === 'select' && !PHONE.matches && !multiIds) inspectorCollapsed = false;
+    lastDetailsId = selectedId;
+  }
+  // A rebuild of the same panel (a save, a layer change) keeps the reader's
+  // scroll position; a different panel starts at the top.
+  const insBox = $('#inspector');
+  const insKey = `${currentId}|${selectedId}|${multiIds ? 'multi' : ''}|${inspectorCollapsed}`;
+  const keepTop = insKey === lastInspectorKey ? insBox.scrollTop : 0;
+  lastInspectorKey = insKey;
   renderTabs(); renderLayers(); renderCanvas(); renderInspector(); renderQuote();
+  if (keepTop) insBox.scrollTop = keepTop;
   syncFooterHeight();
 }
 
@@ -1310,11 +1627,14 @@ function renderAll() {
 function syncFooterHeight() {
   const bar = $('#quote-bar');
   if (bar) document.documentElement.style.setProperty('--footer-h', (bar.offsetHeight + 2) + 'px');
+  // the floating tool dock (layout A) starts below the view tabs, which wrap
+  const tabs = $('#view-tabs');
+  if (tabs) document.documentElement.style.setProperty('--tabs-h', tabs.offsetHeight + 'px');
 }
 window.addEventListener('resize', syncFooterHeight);
 // Crossing the phone breakpoint (resize, or a small tablet rotating) resets the
-// details panel to that layout's default: closed on phones, open elsewhere.
-const onPhoneChange = () => { inspectorCollapsed = PHONE.matches; renderAll(); };
+// details panel to the layout A default: folded, drawing first.
+const onPhoneChange = () => { inspectorCollapsed = true; renderAll(); };
 if (PHONE.addEventListener) PHONE.addEventListener('change', onPhoneChange);
 else PHONE.addListener(onPhoneChange);
 
@@ -1711,12 +2031,14 @@ function openMenu() {
   const status = [$('#save-chip').textContent, $('#offline-chip').textContent, job.sample ? 'Sample job with example data' : 'Example rates only'];
   box.appendChild(el('p', { class: 'menu-status', 'data-testid': 'menu-status', style: 'font-size:14px;margin:0 0 8px' }, status.join(' · ')));
   const items = [
-    ...(hasRecovery() ? [['Recover unreadable saved data', () => { closeModal(); openRecovery(); }]] : []),
+    ...(hasRecovery() ? [['Recover saved data', () => { closeModal(); openRecovery(); }]] : []),
+    ['Jobs', () => { closeModal(); openJobsList(); }],
     ['New job', () => { closeModal(); confirmNewJob(); }],
     ['Room size', () => { closeModal(); openRoomForm(); }],
     ['Rates for this job', () => { closeModal(); openRates(); }],
     ['Download backup (JSON)', () => { closeModal(); downloadBackup(); }],
-    ['Import backup', () => { closeModal(); $('#file-input').click(); }],
+    ['Download all jobs', () => { closeModal(); downloadAllJobs(); }],
+    ['Import backup as new job', () => { closeModal(); $('#file-input').click(); }],
     ['Download CSV', () => { closeModal(); downloadCsv(); }],
     ['Print', () => { closeModal(); openPrint(); }],
     ['Try layers demo', () => { closeModal(); confirmLayersDemo(); }],
@@ -1736,58 +2058,357 @@ function openMenu() {
 
 function openAbout() {
   modal('About this prototype', [
-    el('p', {}, 'Your job is saved in this browser on this device only. It isn’t sent anywhere and doesn’t sync. Clearing browser data deletes it, so download a backup to keep a copy.'),
+    el('p', {}, 'Your jobs are saved in this browser on this device only. They aren’t sent anywhere and don’t sync. Clearing browser data deletes them, so use Download all jobs to keep a copy.'),
     el('p', {}, 'Example labour rates only. Not a quotation, electrical design or compliance tool.'),
     el('p', {}, 'Tested with simulated pen and touch. Not yet tried on a real Surface, and palm rejection is unverified.'),
   ], [{ label: 'Close', class: 'btn-primary', fn: closeModal }]);
 }
 
-function confirmNewJob() {
-  modal('Start a new job', [el('p', {}, 'This replaces your current job. Download a backup first?')], [
-    { label: 'Cancel', fn: closeModal },
-    { label: 'Continue without backup', testid: 'newjob-nobackup', fn: () => { closeModal(); showStart(); } },
+// A new job never replaces the current one. Name and room size come first
+// (a job without a room can't be saved), so Cancel creates nothing.
+function confirmNewJob() { openNewJobForm(); }
+function openNewJobForm() {
+  const box = el('div');
+  box.appendChild(el('label', {}, 'Job name'));
+  const name = el('input', { type: 'text', maxlength: String(C.LIMITS.maxTextLen), 'data-testid': 'newjob-name' });
+  name.value = 'Untitled room';
+  box.appendChild(name);
+  const fields = {};
+  for (const [key, labelTxt, max] of [['widthM', 'Width (m)', C.LIMITS.maxWallM], ['depthM', 'Depth (m)', C.LIMITS.maxWallM], ['heightM', 'Height (m)', C.LIMITS.maxHeightM]]) {
+    box.appendChild(el('label', {}, labelTxt));
+    const i = el('input', { type: 'number', inputmode: 'decimal', step: '0.01', min: '0.1', max: String(max), 'data-testid': `room-${key}` });
+    box.appendChild(i);
+    fields[key] = { input: i, max };
+  }
+  const errP = el('p', { class: 'field-err' }); errP.hidden = true; box.appendChild(errP);
+  const isEdited = () => name.value !== 'Untitled room' || Object.values(fields).some(f => f.input.value !== '');
+  guardedForm('New job', [box], [
+    { label: 'Cancel', testid: 'newjob-cancel', fn: closeModal },
     {
-      // Fail closed (BL-05): if the backup didn't download, the current job
-      // must NOT be replaced. Stay on the modal; nothing has changed.
-      label: 'Download and continue', class: 'btn-primary', testid: 'newjob-download-continue', fn: () => {
-        if (!downloadBackup()) {
-          toast('New job not started — the backup of your current job didn’t download. Nothing has changed.');
-          return;
+      label: 'Create job', class: 'btn-primary', testid: 'room-save', fn: () => {
+        const vals = {};
+        for (const k of ['widthM', 'depthM', 'heightM']) {
+          const v = Number(fields[k].input.value);
+          if (!(fields[k].input.value !== '' && v >= 0.1 && v <= fields[k].max)) {
+            errP.hidden = false;
+            errP.textContent = `Enter a ${k === 'heightM' ? 'height' : k.replace('M', '')} between 0.10 m and ${fields[k].max} m.`;
+            return;
+          }
+          vals[k] = Math.round(v * 100) / 100;
         }
-        closeModal(); showStart();
+        const j = C.blankJob(name.value.trim() || 'Untitled room');
+        j.room = vals;
+        closeModal();
+        startNewJob(j, { kind: 'new' });
       },
     },
-  ]);
+  ], isEdited, 'You have started filling in a new job.');
 }
 
 function openLayersDemo() {
-  beginJob(C.layersDemoJob());
-  toast('Layers demo opened. It’s made up, and the fused spur and three-phase prices are blank on purpose.', 5000);
+  startNewJob(C.layersDemoJob(), { kind: 'sample' },
+    'Layers demo added as a new job. It’s made up, and the fused spur and three-phase prices are blank on purpose.');
 }
 function confirmLayersDemo() {
   modal('Try the layers demo', [
-    el('p', {}, 'Opens a made-up workshop with lighting, sockets & spurs and three-phase fittings. It replaces your current job on this device. Download a backup first?'),
+    el('p', {}, 'Adds a made-up workshop with lighting, sockets & spurs and three-phase fittings as a new job. Your current job stays as it is.'),
   ], [
     { label: 'Cancel', fn: closeModal },
-    { label: 'Open without backup', testid: 'demo-nobackup', fn: () => { closeModal(); openLayersDemo(); } },
-    { label: 'Download and open', class: 'btn-primary', fn: () => { if (downloadBackup()) { closeModal(); openLayersDemo(); } } },
+    { label: 'Open demo', class: 'btn-primary', testid: 'demo-nobackup', fn: () => { closeModal(); openLayersDemo(); } },
   ]);
 }
 
 function showStart() {
-  const saved = loadSaved();
+  const s = jobsApi && jobsApi.safeScan();
   $('#start').hidden = false;
   $('#app').hidden = true;
-  $('#start-continue').hidden = !saved;
+  $('#start-continue').hidden = !(s && s.jobs.length);
 }
-function beginJob(j) {
+function beginJob(j, prefs = null) {
   clearDrafts(); // a pending draft belongs to the job being left, never this one
+  clearTimeout(saveTimer);
+  refusedNumber = null;
   job = C.normaliseJob(j); history = []; redoStack = []; selectedId = null; view = 'PLAN'; zoom = { s: 1, tx: 0, ty: 0 }; multiIds = null; multiDraft = ''; multiPending = null;
   shownLayers = new Set(C.LAYERS); layersOpen = false;
+  // remembered type and heights belong to this job; copy mode never crosses jobs
+  jobPrefs = J.cleanPrefs(prefs);
+  placeType = jobPrefs.lastType ?? 'surface';
+  copyTpl = null;
+  buildPalette();
   $('#start').hidden = true; $('#app').hidden = false;
   renderAll();
   if (!job.room.widthM) openRoomForm();
-  scheduleSave();
+}
+
+// ---- Switching jobs (§4.5) ---------------------------------------------------------
+// Leaving a job first commits a valid draft and saves it, and waits for that
+// save. An invalid number or a failed save keeps the current job open and says
+// why. Undo history and selection never cross jobs (beginJob resets them).
+let switchBusy = false;
+async function switchJobs(action) {
+  if (switchBusy) return false;
+  switchBusy = true;
+  try {
+    if (!(await leaveJob(action))) return false;
+    await action();
+    return true;
+  } finally { switchBusy = false; }
+}
+async function leaveJob(action) {
+  if (!job) return true;
+  const d = flushDraft();
+  if (d && !d.valid) { refuseSwitch('Fix the highlighted number or undo it before switching.', null, false); return false; }
+  if (refusedNumber) {
+    // Tapping Menu already took focus from the field, which refused the number
+    // and put the saved one back. Say so before leaving, once.
+    const n = refusedNumber;
+    refusedNumber = null;
+    refuseSwitch(`The ${n.text} you typed (${n.value || 'blank'}) isn’t valid, so it wasn’t saved. Fix it before switching, or switch and keep the saved value.`, action, false, 'Switch anyway');
+    return false;
+  }
+  clearTimeout(saveTimer);
+  let r = await saveNow();
+  // an edit made while that save ran gets its own save before leaving
+  if (r.ok && access === 'edit' && contentKey() !== savedCanon) r = await saveNow();
+  if (r.ok && access === 'edit' && contentKey() !== savedCanon) r = { ok: false, reason: 'Your latest change is still being saved. Try again in a moment.' };
+  if (!r.ok) { refuseSwitch(r.reason, r.canLeave ? action : null, true); return false; }
+  return true;
+}
+function refuseSwitch(reason, discardAction, offerCopy, discardLabel = null) {
+  const acts = [
+    { label: 'Stay in this job', class: 'btn-primary', testid: 'switch-stay', fn: closeModal },
+    { label: 'Download backup', testid: 'switch-download', fn: () => downloadBackup() },
+  ];
+  if (offerCopy && jobsApi.canWrite) acts.push({ label: 'Save as new job', testid: 'switch-save-new', fn: () => { closeModal(); saveCopyAsNew(); } });
+  if (discardAction && discardLabel) {
+    // the refused number was never stored: switching keeps the saved value
+    acts.push({ label: discardLabel, testid: 'switch-anyway', fn: () => { closeModal(); switchJobs(discardAction); } });
+  } else if (discardAction) {
+    // Only where this version can never be saved to its record (another tab,
+    // no safe storage). A rescue copy is kept in Recover first.
+    acts.push({
+      label: 'Leave without saving', class: 'btn-danger', testid: 'switch-discard', fn: async () => {
+        closeModal();
+        const kept = jobsApi.writeRescue({ writerTab: writerTab + 'x' + Date.now().toString(36), jobId: currentId, baseRev: currentId ? lastKnownRev : null, job });
+        if (!kept.ok) { confirmDiscardUnkept(kept, discardAction); return; } // stay until the user chooses
+        await discardAction();
+        toast('Left without saving. A copy of the changes is kept in Menu → Recover saved data.');
+      },
+    });
+  }
+  modal('Still in this job', [el('p', { 'data-testid': 'switch-refused' }, reason)], acts);
+}
+// The copy for Recover couldn't be written: this job stays open unless the
+// user explicitly chooses to throw the changes away.
+function confirmDiscardUnkept(kept, discardAction) {
+  const why = kept.reason === 'rescue-full'
+    ? `Recover already holds ${J.MAX_RESCUES} kept copies, so these changes couldn’t be kept.`
+    : 'This device’s storage refused, so these changes couldn’t be kept.';
+  modal('Changes not kept', [
+    el('p', { 'data-testid': 'leave-not-kept' }, `${why} You’re still in this job. Download a backup first, or leave and lose these changes.`),
+  ], [
+    { label: 'Stay in this job', class: 'btn-primary', testid: 'leave-stay', fn: closeModal },
+    { label: 'Download backup', testid: 'leave-download', fn: () => downloadBackup() },
+    ...(kept.reason === 'rescue-full' ? [{ label: 'Open Recover', testid: 'leave-recover', fn: () => { closeModal(); openRecovery(); } }] : []),
+    {
+      label: 'Leave and lose changes', class: 'btn-danger', testid: 'leave-discard-confirm', fn: async () => {
+        closeModal();
+        await discardAction();
+        toast('Left without saving. These changes weren’t kept.');
+      },
+    },
+  ]);
+}
+function releaseOwner() {
+  if (ownerLock) { ownerLock.release(); ownerLock = null; }
+}
+// Open a stored job. Reads it first (nothing changes if it can't be read),
+// then takes edit ownership — or opens it read-only if another tab has it.
+async function openRecord(jobId, note = '') {
+  const pre = jobsApi.readJob(jobId);
+  if (!pre.ok) { toast(pre.reason === 'unreadable' ? 'That job can’t be read. It’s kept as it is, and you can download it from Jobs.' : 'That job couldn’t be opened. Nothing has changed.'); return false; }
+  access = 'switching';
+  releaseOwner();
+  const token = ++openToken;
+  let o = null;
+  if (lockSupport) o = TEST_HOOKS.noOwnerLock ? { release() {} } : await jobsApi.acquireOwner(jobId);
+  if (token !== openToken) { if (o) o.release(); return false; }
+  const r = jobsApi.readJob(jobId); // fresh writeRev now that ownership is settled
+  if (!r.ok) {
+    if (o) o.release();
+    job = null; currentId = null;
+    showStart();
+    toast('That job couldn’t be opened. Nothing has changed.');
+    return false;
+  }
+  beginJob(r.env.job, r.env.prefs);
+  currentId = jobId;
+  lastKnownRev = r.env.writeRev;
+  savedCanon = contentKey();
+  accessNote = '';
+  ownerLock = o;
+  access = !lockSupport ? 'fallback' : (o ? 'edit' : 'other-tab');
+  if (lockSupport) jobsApi.writeState(jobId);
+  showAccessState();
+  if (note) toast(note);
+  return true;
+}
+// A job with no record of its own here (no safe storage, or the list is full).
+// storedElsewhere: its content is safe as it is (e.g. the older-version key).
+function openInMemory(j, mode, storedElsewhere, note = '') {
+  access = 'switching';
+  releaseOwner();
+  openToken++;
+  beginJob(j);
+  currentId = null; lastKnownRev = 0; jobPrefs = J.cleanPrefs(null);
+  savedCanon = storedElsewhere ? contentKey() : null;
+  accessNote = note;
+  access = mode;
+  showAccessState();
+}
+function createFailText(r) {
+  switch (r.reason) {
+    case 'cap': return `This device already holds ${r.count} jobs, the most it can keep (${J.MAX_JOBS}). Nothing was added. Download all jobs to keep a copy.`;
+    case 'too-large': return 'This job is too large to store on this device. Nothing was added.';
+    case 'lock-timeout': return 'Another tab kept the job list busy. Nothing was added. Try again in a moment.';
+    case 'invalid': return `This job can’t be saved (${r.detail}). Nothing was added.`;
+    case 'no-locks': return 'This browser can’t safely save jobs on this device. Nothing was added.';
+    case 'legacy-changed': return 'The older-version job changed while it was being added. Nothing was added. Try again.';
+    case 'unreadable': return 'That copy can’t be read. Nothing was added.';
+    case 'readback': return 'This device didn’t give back the job just stored, so it couldn’t be checked. Check Jobs before trying again.';
+    default: return 'This device’s storage is full or blocked. Nothing was added.';
+  }
+}
+function jobNotAdded(r) {
+  modal('Job not added', [el('p', { 'data-testid': 'create-refused' }, createFailText(r))], [{ label: 'Close', class: 'btn-primary', fn: closeModal }]);
+}
+async function startNewJob(j, origin, okMsg = '') {
+  await switchJobs(async () => {
+    if (!jobsApi.canWrite) { openInMemory(j, 'fallback', false); if (okMsg) toast(okMsg, 5000); return; }
+    const r = await jobsApi.create({ job: j, origin, writerTab });
+    if (!r.ok) { jobNotAdded(r); return; }
+    await openRecord(r.jobId, okMsg);
+  });
+}
+// Same content, new record. The record it came from is never touched.
+async function saveCopyAsNew() {
+  if (!job || !jobsApi.canWrite) return;
+  const d = flushDraft();
+  if (d && !d.valid) { toast('Fix the highlighted number or undo it first.'); return; }
+  const r = await jobsApi.create({ job: JSON.parse(JSON.stringify(job)), prefs: jobPrefs, origin: { kind: 'new', copyOf: currentId }, writerTab });
+  if (!r.ok) { jobNotAdded(r); return; }
+  await openRecord(r.jobId, 'Saved as a new job. The other copy wasn’t changed.');
+}
+function confirmReloadSaved() {
+  modal('Reload the saved version?', [
+    el('p', {}, 'This replaces what’s on screen with the version saved on this device. Unsaved changes on screen are lost, so download them first if you need them.'),
+  ], [
+    { label: 'Cancel', fn: closeModal },
+    { label: 'Download this version', fn: () => downloadBackup() },
+    { label: 'Reload saved version', class: 'btn-danger', testid: 'reload-confirm', fn: async () => { closeModal(); if (currentId) await openRecord(currentId); } },
+  ]);
+}
+async function openRescueAsNew(key) {
+  await switchJobs(async () => {
+    const r = await jobsApi.promoteRescue({ key, writerTab });
+    if (!r.ok) { jobNotAdded(r); return; }
+    await openRecord(r.jobId, r.existing
+      ? 'These kept changes were already saved in this job, so it was opened. Nothing was added.'
+      : 'Opened the kept changes as a new job.');
+  });
+}
+
+// ---- Jobs list, all-jobs download, older-version offer --------------------------------
+function openJobsList() {
+  const s = jobsApi && jobsApi.safeScan();
+  if (!s) { toast('This device’s storage is blocked, so saved jobs can’t be listed. Nothing has been changed.'); return false; }
+  const box = el('div');
+  box.appendChild(el('p', { 'data-testid': 'jobs-summary', style: 'font-size:14px' },
+    `${s.jobs.length} of ${J.MAX_JOBS} jobs on this device · about ${Math.max(1, Math.round(s.bytes * 2 / 1024))} KB stored`));
+  if (!jobsApi.canWrite) box.appendChild(el('p', { class: 'field-err' }, 'This browser can’t safely save jobs here. You can open them and look, but changes aren’t saved.'));
+  if (legacyOffer) {
+    const row = el('div', { class: 'job-row', 'data-testid': 'jobs-offer' });
+    row.appendChild(el('p', {}, `Older-version job found: “${legacyOffer.job.name}”.`));
+    const b = el('button', { 'data-testid': 'jobs-offer-accept' }, 'Add it as a new job');
+    b.addEventListener('click', acceptLegacyOffer);
+    row.appendChild(b);
+    box.appendChild(row);
+  }
+  if (job) {
+    const row = el('div', { class: 'job-row', 'data-testid': 'jobs-current' });
+    row.appendChild(el('p', {}, `Open now: ${job.name}`));
+    const b = el('button', { 'data-testid': 'jobs-rename' }, 'Rename');
+    b.addEventListener('click', () => { closeModal(); renameJob(); });
+    row.appendChild(b);
+    box.appendChild(row);
+  }
+  for (const j of s.jobs) {
+    const row = el('div', { class: 'job-row', 'data-testid': `jobs-row-${j.jobId}` });
+    if (j.ok) {
+      const isOpen = j.jobId === currentId;
+      row.appendChild(el('p', {}, `${j.env.job.name} · ${j.env.job.items.length} fitting${j.env.job.items.length === 1 ? '' : 's'}${isOpen ? ' · open now' : ''}`));
+      const b = el('button', { 'data-testid': `jobs-open-${j.jobId}` }, isOpen ? 'Open now' : 'Open');
+      b.disabled = isOpen;
+      b.addEventListener('click', () => { closeModal(); switchJobs(() => openRecord(j.jobId)); });
+      row.appendChild(b);
+    } else {
+      row.appendChild(el('p', {}, `Unreadable job, kept as it is (${j.reason}).`));
+      const b = el('button', { 'data-testid': `jobs-download-${j.jobId}` }, 'Download raw');
+      b.addEventListener('click', () => { downloadRawRecord(j.raw); toast('Download started. Check your Downloads folder; the record stays here.'); });
+      row.appendChild(b);
+    }
+    box.appendChild(row);
+  }
+  if (!s.jobs.length) box.appendChild(el('p', {}, 'No saved jobs on this device yet.'));
+  modal('Jobs', [box], [
+    { label: 'Close', fn: closeModal },
+    { label: 'Download all jobs', testid: 'jobs-download-all', fn: () => downloadAllJobs() },
+    { label: 'New job', class: 'btn-primary', testid: 'jobs-new', fn: () => { closeModal(); openNewJobForm(); } },
+  ]);
+  return true;
+}
+// Saved copies only. Unreadable records are reported, never silently left out.
+function downloadAllJobs() {
+  const s = jobsApi && jobsApi.safeScan();
+  if (!s) { toast('This device’s storage is blocked, so saved jobs can’t be read. Nothing has been changed.'); return; }
+  const a = J.buildArchive(s, new Date().toISOString());
+  const skipped = a.unreadable ? ` ${a.unreadable} unreadable record${a.unreadable === 1 ? '' : 's'} not included. Download ${a.unreadable === 1 ? 'it' : 'them'} from Recover.` : '';
+  if (!a.count) { toast(`No readable saved jobs to download.${skipped}`, 6000); return; }
+  download(`all-jobs-${stamp()}.json`, a.text, 'application/json');
+  const unsaved = job && savedCanon !== contentKey() ? ' Changes on screen that aren’t saved aren’t included.' : '';
+  toast(`${a.count} job${a.count === 1 ? '' : 's'} downloaded. Check the file landed in your Downloads folder.${skipped}${unsaved}`, 6000);
+}
+function showLegacyOffer() {
+  modal('Older-version job found', [
+    el('p', {}, `“${legacyOffer.job.name}” was saved by the older version of this app after your jobs were upgraded. Add it as a new job? Your other jobs won’t change.`),
+  ], [
+    { label: 'Not now', fn: closeModal },
+    { label: 'Add as new job', class: 'btn-primary', testid: 'legacy-offer-accept', fn: acceptLegacyOffer },
+  ]);
+}
+async function acceptLegacyOffer() {
+  closeModal();
+  const r = await jobsApi.reconcileLegacy({ writerTab, accept: true });
+  if (r.ok && r.status === 'skipped') {
+    // its upgrade record became unreadable after the offer: nothing is added
+    legacyOffer = null;
+    legacyMarkerUnreadable = true;
+    modal('Older-version job not added', [
+      el('p', { 'data-testid': 'legacy-skipped' }, 'The older-version job wasn’t added, because its upgrade record can’t be read and adding it could make a second copy. Nothing was changed. You can download the older-version job from Recover.'),
+    ], [
+      { label: 'Close', fn: closeModal },
+      { label: 'Open Recover', class: 'btn-primary', testid: 'legacy-skipped-recover', fn: () => openRecovery() },
+    ]);
+    return;
+  }
+  if (r.ok) {
+    legacyOffer = null;
+    toast(r.status === 'none' ? 'The older-version job has gone, so nothing was added.'
+      : r.created ? `Added “${r.legacy.job.name}” as a new job. Your other jobs weren’t changed.`
+        : 'That older-version job is already in your list.');
+    return;
+  }
+  jobNotAdded(r);
 }
 
 // ---- Import ------------------------------------------------------------------------
@@ -1795,44 +2416,75 @@ $('#file-input').addEventListener('change', (e) => {
   const file = e.target.files[0];
   e.target.value = '';
   if (!file) return;
+  const failed = (msg) => modal('Import failed', [el('p', { 'data-testid': 'import-failed' }, msg)], [{ label: 'Close', class: 'btn-primary', fn: closeModal }]);
+  if (file.size > J.MAX_ARCHIVE_BYTES) {
+    failed(`This file is too large to import (${(file.size / 1e6).toFixed(1)} MB; the limit is ${J.MAX_ARCHIVE_BYTES / 1e6} MB). Nothing has changed.`);
+    return;
+  }
   file.text().then((text) => {
+    if (J.isArchiveText(text)) { importArchiveFlow(text, file.size); return; }
     let r;
     try { r = C.parseBackup(text); }
     catch (err) { r = { ok: false, errors: [String(err && err.message || err)] }; }
-    if (!r.ok) {
-      modal('Import failed', [
-        el('p', {}, `This file isn’t a valid job backup (${r.errors[0]}). Nothing has changed.`),
-      ], [{ label: 'Close', class: 'btn-primary', fn: closeModal }]);
-      return;
-    }
+    if (!r.ok) { failed(`This file isn’t a valid job backup (${r.errors[0]}). Nothing has changed.`); return; }
     const s = C.summariseBackup(r.job);
-    const checkbox = el('input', { type: 'checkbox' }); checkbox.checked = true;
-    const lbl = el('label', {}, 'Download current job first'); lbl.prepend(checkbox);
+    // Importing never replaces anything: the backup becomes a new job.
     modal('Import backup', [
       el('p', {}, `“${s.name}” · ${s.size} · ${s.items} fittings · saved ${new Date(s.savedAt).toLocaleString('en-GB')}${s.complete ? '' : ' · contains unpriced items'}`),
-      el('p', {}, 'Replace your current job?'),
-      lbl,
+      el('p', {}, 'It will be added as a new job. Your current job stays as it is.'),
     ], [
       { label: 'Cancel', fn: closeModal },
-      {
-        label: 'Replace job', class: 'btn-primary', testid: 'import-confirm', fn: () => {
-          // If the user asked to keep a backup first and that backup failed,
-          // stop here: nothing has been replaced.
-          if (checkbox.checked && job && !downloadBackup()) {
-            toast('Import stopped — the backup of your current job didn’t download. Nothing has changed.');
-            return;
-          }
-          const imported = r.job;
-          beginJob(imported);
-          history = []; // import is a fresh start; cannot partially undo into old job
-          renderAll();
-          closeModal();
-          toast('Job imported');
-        },
-      },
+      { label: 'Add as new job', class: 'btn-primary', testid: 'import-confirm', fn: () => { closeModal(); startNewJob(r.job, { kind: 'import' }, 'Backup added as a new job'); } },
     ]);
-  });
+  }).catch(() => failed('This file couldn’t be read. Nothing has changed.'));
 });
+// All-jobs archive: validated as a whole before anything is written (§4.7).
+function importArchiveFlow(text, size) {
+  const v = J.validateArchive(text, size);
+  const close = [{ label: 'Close', class: 'btn-primary', fn: closeModal }];
+  if (!v.ok) {
+    const ul = el('ul', { 'data-testid': 'import-failed' });
+    for (const e of v.errors.slice(0, 10)) ul.appendChild(el('li', {}, e));
+    modal('Import failed', [el('p', {}, 'This archive can’t be imported:'), ul, el('p', {}, 'Nothing has changed.')], close);
+    return;
+  }
+  if (!jobsApi.canWrite) {
+    modal('Import not available', [el('p', { 'data-testid': 'import-failed' }, 'This browser can’t safely save jobs on this device, so the archive wasn’t imported. Nothing has changed.')], close);
+    return;
+  }
+  const n = v.entries.length;
+  modal('Import all-jobs archive', [
+    el('p', {}, `This archive holds ${n} job${n === 1 ? '' : 's'}. They’ll be added as new jobs, and any already on this device are skipped. Your current job stays as it is.`),
+  ], [
+    { label: 'Cancel', fn: closeModal },
+    {
+      label: 'Add jobs', class: 'btn-primary', testid: 'archive-confirm', fn: async () => {
+        closeModal();
+        const r = await jobsApi.importArchive({ text, byteSize: size, writerTab });
+        let msg;
+        if (r.ok) {
+          msg = r.added
+            ? `Added ${r.added} job${r.added === 1 ? '' : 's'}.${r.skipped ? ` Skipped ${r.skipped} already on this device.` : ''}`
+            : `Nothing to add. All ${r.total} jobs are already on this device.`;
+        } else if (r.reason === 'cap') {
+          msg = `This device holds at most ${r.max} jobs. You have ${r.existing} and the archive would add ${r.adding}. Nothing has changed.`;
+        } else if (r.reason === 'journal') {
+          msg = 'This device’s storage is full or blocked, so nothing was imported. Nothing has changed.';
+        } else if (Number.isInteger(r.added)) {
+          const why = {
+            quota: 'storage full',
+            readback: 'this device didn’t store a job correctly',
+            'too-large': 'a job is too large to store on this device',
+            blocked: 'this device’s storage refused',
+            'lock-timeout': 'another tab kept the job list busy',
+          }[r.reason] || 'a storage problem';
+          msg = `Added ${r.added} of ${r.total} — ${why}. Existing jobs unchanged. Menu → Recover saved data lists this incomplete import; choose the same file again to add the rest.`;
+        } else msg = createFailText(r);
+        modal(r.ok ? 'Import finished' : 'Import stopped', [el('p', { 'data-testid': 'archive-result' }, msg)], close);
+      },
+    },
+  ]);
+}
 
 // ---- Pointer interaction --------------------------------------------------------------
 // EP19-05 (BL-09/10): finger selection needs a dead zone and a clear target.
@@ -1863,7 +2515,7 @@ function noteInput(e, outcome) {
 
 // Local-only drawing check shown in the Menu for support calls. Holds pointer
 // facts only, never job content, and is never sent anywhere.
-const BUILD_LABEL = 'Electrical finger update 3';
+const BUILD_LABEL = 'Electrical jobs update 1';
 let downCount = 0;
 let lastDown = { id: null };
 function startDiag(e) {
@@ -2175,16 +2827,23 @@ $('#canvas').addEventListener('pointerdown', (e) => {
 function placeAt(p) {
   if (!p || !job.room || !job.room.widthM) { toast('Set the room size first.'); return; }
   const dims = roomMm();
+  const tpl = copyTpl;
+  const type = tpl ? tpl.type : placeType;
   let wall, fromLeft, height;
-  if (placeType === 'downlight') {
-    if (view !== 'PLAN') { toast('Downlights go on the ceiling — switch to the plan view.'); return; }
+  if (type === 'downlight') {
+    if (view !== 'PLAN') {
+      if (endCopy()) { toast('Stopped placing copies. Downlights can only be copied in the plan view.'); renderAll(); return; }
+      toast('Downlights go on the ceiling — switch to the plan view.'); return;
+    }
+    // a copied downlight takes type and layer only: its heightMm is a plan position (E9)
     wall = C.CEILING;
     fromLeft = Math.max(0, Math.min(dims.W, Math.round(p.x)));
     height = Math.max(0, Math.min(dims.D, Math.round(p.y)));
   } else if (view !== 'PLAN') {
+    // a copy keeps its captured height in every view; the tap gives only the distance from the left
     wall = view;
     fromLeft = Math.max(0, Math.min(Math.round(p.x), C.wallLengthMm(job.room, view)));
-    height = Math.max(0, Math.min(dims.H - Math.round(p.y), dims.H));
+    height = tpl ? tpl.heightMm : Math.max(0, Math.min(dims.H - Math.round(p.y), dims.H));
   } else {
     wall = nearestWallFromPlan(p.x, p.y);
     const wp = wallParamsFromPlan(p.x, p.y, wall);
@@ -2194,15 +2853,25 @@ function placeAt(p) {
     }
     const maxL = C.wallLengthMm(job.room, wall);
     fromLeft = Math.max(0, Math.min(wp.fromLeft, maxL)); // clamp taps beyond the wall ends
-    height = C.TYPES[placeType].defaultHeightMm ?? 450;
+    height = tpl ? tpl.heightMm : (jobPrefs.heights[type] ?? C.TYPES[type].defaultHeightMm ?? 450);
   }
   fromLeft = Math.max(0, fromLeft);
+  let clampNote = '';
+  if (wall !== C.CEILING) {
+    const c = C.clampWallHeight(job, height);
+    if (c.clamped) clampNote = ` · height set to ${c.heightMm} mm, the ceiling height`;
+    height = c.heightMm;
+  }
   let id, revealed = null;
   // Placing onto a hidden layer shows that layer, so the new fitting never vanishes.
-  commit(() => { id = C.placeItem(job, placeType, wall, fromLeft, height); revealed = revealLayerOf(id); });
+  commit(() => {
+    id = tpl ? C.placeLike(job, { type, layer: tpl.layer }, wall, fromLeft, height) : C.placeItem(job, type, wall, fromLeft, height);
+    revealed = revealLayerOf(id);
+  });
   if (!id) return; // commit failed (e.g. item cap); job untouched
+  rememberHeight(type, wall, height);
   selectedId = id;
-  toast(`${id} placed on ${wall === C.CEILING ? 'ceiling' : 'Wall ' + wall}${revealed ? ` · ${revealed} layer now shown` : ''}`);
+  toast(`${id} placed on ${wall === C.CEILING ? 'ceiling' : 'Wall ' + wall}${revealed ? ` · ${revealed} layer now shown` : ''}${clampNote}`);
   renderAll();
 }
 
@@ -2386,6 +3055,7 @@ function setMode(m) {
   if (!MODES.includes(m)) return;
   const leftMulti = m !== 'select' && !!multiIds;
   if (leftMulti) endMulti(); // another tool leaves multi mode with no change
+  if (m !== 'place') endCopy(); // so does copy mode
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   $('#place-palette').hidden = m !== 'place';
@@ -2397,12 +3067,23 @@ document.querySelectorAll('.mode-btn[data-mode]').forEach(b => b.addEventListene
 function buildPalette() {
   const pal = $('#place-palette');
   pal.innerHTML = '';
+  if (copyTpl) {
+    // copy mode: the strip holds what is being copied and a touch-sized Cancel
+    const bar = el('div', { class: 'copy-bar', 'data-testid': 'copy-bar', role: 'status' });
+    bar.appendChild(el('span', {}, copyLabel()));
+    const cancel = el('button', { class: 'copy-cancel-btn', 'data-testid': 'copy-cancel' }, 'Cancel');
+    cancel.addEventListener('click', cancelCopy);
+    bar.appendChild(cancel);
+    pal.appendChild(bar);
+    return;
+  }
   pal.appendChild(el('p', { class: 'palette-title' }, 'Pick a fitting'));
   for (const [k, t] of Object.entries(C.TYPES)) {
     const b = el('button', { class: 'pal-btn' + (k === placeType ? ' active' : ''), 'data-type': k, 'data-testid': `pal-${k}` });
     b.append(el('span', { class: 'sym' }, t.symbol), el('span', {}, t.label));
     b.addEventListener('click', () => {
       placeType = k;
+      rememberType(k);
       pal.querySelectorAll('.pal-btn').forEach(x => x.classList.toggle('active', x.dataset.type === k));
       setMode('place');
       renderCanvas();
@@ -2423,9 +3104,21 @@ $('#btn-clear-ink').addEventListener('click', () => {
 // ---- Top bar wiring --------------------------------------------------------------
 $('#btn-undo').addEventListener('click', undo);
 $('#btn-redo').addEventListener('click', redo);
+// Pressing Menu must not blur a number field: the blur refuses an invalid
+// number and resets the save chip, which sits just before Menu in the wrapping
+// top bar, so Menu moved out from under the pointer and the tap was lost. The
+// field keeps focus; the refusal then happens at the switch (leaveJob).
+$('#btn-menu').addEventListener('mousedown', (e) => e.preventDefault());
 $('#btn-menu').addEventListener('click', openMenu);
 $('#btn-breakdown').addEventListener('click', openBreakdown);
+// The job name at the top opens Jobs; Rename is in there. If storage can't be
+// listed, rename stays reachable directly.
+$('#btn-job-name').setAttribute('aria-label', 'Jobs');
+$('#btn-job-name').title = 'Jobs';
 $('#btn-job-name').addEventListener('click', () => {
+  if (!openJobsList() && job) renameJob();
+});
+function renameJob() {
   const box = el('div');
   const nameI = el('input', { 'data-testid': 'job-name-input' }); nameI.value = job.name;
   box.append(el('label', {}, 'Job name'), nameI);
@@ -2435,7 +3128,7 @@ $('#btn-job-name').addEventListener('click', () => {
     { label: 'Cancel', fn: closeModal },
     { label: 'Save', class: 'btn-primary', fn: () => { save(); closeModal(); } },
   ], () => nameI.value !== initialName, 'You have edited the job name.');
-});
+}
 $('#btn-zoom-in').addEventListener('click', () => { zoom.s = Math.min(4, zoom.s * 1.25); renderCanvas(); });
 $('#btn-zoom-out').addEventListener('click', () => { zoom.s = Math.max(0.5, zoom.s / 1.25); renderCanvas(); });
 $('#btn-zoom-fit').addEventListener('click', () => { zoom = { s: 1, tx: 0, ty: 0 }; renderCanvas(); });
@@ -2487,6 +3180,7 @@ document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
   else if ((e.ctrlKey && e.key.toLowerCase() === 'y') || (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'z')) { e.preventDefault(); redo(); }
   else if (e.key === 'Delete' && selectedId) { commit(() => { job.items = job.items.filter(i => i.id !== selectedId); }); toast(`${selectedId} deleted · Undo`); selectedId = null; renderAll(); }
+  else if (e.key === 'Escape' && copyTpl) cancelCopy(); // leaves copy mode with nothing added
   else if (e.key === 'Escape') {
     if (PHONE.matches) inspectorCollapsed = true;
     endMulti(); // Escape outside a field cancels multi mode with no change
@@ -2499,8 +3193,8 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ---- Start buttons -----------------------------------------------------------------
-$('#start-blank').addEventListener('click', () => beginJob(C.blankJob('Untitled room')));
-$('#start-sample').addEventListener('click', () => beginJob(C.sampleJob()));
+$('#start-blank').addEventListener('click', () => openNewJobForm());
+$('#start-sample').addEventListener('click', () => startNewJob(C.sampleJob(), { kind: 'sample' }));
 $('#start-layers-demo').addEventListener('click', openLayersDemo);
 // phones share the screen between the two panels: opening Layers collapses details
 $('#btn-layers').addEventListener('click', () => {
@@ -2513,11 +3207,7 @@ $('#btn-layers').addEventListener('click', () => {
   setLayersOpen(!layersOpen);
 });
 $('#btn-layers-reset').addEventListener('click', () => applyLayers(new Set(C.LAYERS)));
-$('#start-continue').addEventListener('click', () => {
-  const saved = loadSaved();
-  if (saved) { beginJob(saved); history = []; renderAll(); }
-  else showStart();
-});
+$('#start-continue').addEventListener('click', () => openJobsList());
 $('#start-import').addEventListener('click', () => $('#file-input').click());
 
 // ---- Offline / online chips ----------------------------------------------------------
@@ -2554,24 +3244,68 @@ if ('serviceWorker' in navigator) {
 buildPalette();
 setMode('select');
 renderFingerMode();
-// Boot: a readable saved job opens as before. An unreadable one is quarantined
-// (never replaced) and the recovery UI opens — now and on every later reload
-// until every preserved copy is explicitly deleted (downloading alone clears
-// nothing, by design).
-const storedAtBoot = readStored();
-if (storedAtBoot.status === 'ok') {
-  beginJob(storedAtBoot.job);
-  // preserved unreadable copies still need attention: offer recovery on every
-  // boot until each one is explicitly deleted
-  if (recoverySlots().length) openRecovery();
-} else if (storedAtBoot.status === 'unreadable') {
-  if (!quarantineUnreadable(storedAtBoot.raw)) recoveryPendingMain = storedAtBoot.raw;
-  showStart();
-  openRecovery();
-} else if (storedAtBoot.status === 'blocked') {
-  showStart();
-  toast('This device’s storage is blocked, so any saved job can’t be read. Nothing has been changed.');
-} else {
-  showStart();
-  if (recoverySlots().length) openRecovery();
+// Boot (§4.6), async: detect safe storage, copy a readable older-version job
+// into the job list once (its key is never changed), then reopen the last job
+// opened here. Recover opens while anything needs attention; it's never
+// cleared by downloading.
+async function bootJobs() {
+  let store = null;
+  try { store = window.localStorage; } catch { store = null; }
+  const blocked = () => { throw new Error('storage blocked'); };
+  const storage = store || { get length() { return blocked(); }, key: blocked, getItem: blocked, setItem: blocked, removeItem: blocked };
+  lockSupport = !!(navigator.locks && typeof navigator.locks.request === 'function' && window.crypto && crypto.subtle);
+  const sha256 = lockSupport
+    ? async (s) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)))].map(b => b.toString(16).padStart(2, '0')).join('')
+    : null;
+  jobsApi = J.createJobs({ storage, locks: lockSupport ? navigator.locks : null, sha256, lockDelayMs: TEST_HOOKS.lockDelayMs || 0 });
+  let legacy = jobsApi.peekLegacy();
+  let legacyJobId = null;
+  let notice = '';
+  let markerNote = '';
+  if (lockSupport) {
+    let m = await jobsApi.reconcileLegacy({ writerTab });
+    if (!m.ok && m.reason === 'legacy-changed') m = await jobsApi.reconcileLegacy({ writerTab });
+    if (m.legacy) legacy = m.legacy;
+    if (m.ok && m.status === 'offer') legacyOffer = { job: legacy.job };
+    else if (m.ok && m.markerUnreadable) {
+      legacyMarkerUnreadable = true;
+      markerNote = 'The older-version job wasn’t added again: its upgrade record can’t be read. Both are kept as they are; download it from Menu → Recover saved data.';
+    }
+    else if (m.ok) legacyJobId = m.jobId || null;
+    else if (legacy.status === 'ok') {
+      notice = m.reason === 'cap'
+        ? `The job list is full (${J.MAX_JOBS} jobs), so the older-version job “${legacy.job.name}” wasn’t added to it. Download a backup of it.`
+        : 'The older-version job couldn’t be added to your job list. Download a backup of it.';
+    }
+  }
+  const s = jobsApi.safeScan();
+  if (!s) {
+    showStart();
+    toast('This device’s storage is blocked, so saved jobs can’t be read. Nothing has been changed.');
+    return;
+  }
+  const readable = (id) => !!id && s.jobs.some(j => j.ok && j.jobId === id);
+  const last = jobsApi.readState();
+  let opened = false;
+  let noticeHidden = false; // the older-version notice wasn't shown by what opened
+  if (readable(last)) { opened = await openRecord(last, notice || markerNote); noticeHidden = !!notice; }
+  else if (notice) { openInMemory(legacy.job, 'unsaved', true, notice); opened = true; }
+  else if (readable(legacyJobId)) opened = await openRecord(legacyJobId);
+  else if (!lockSupport && legacy.status === 'ok') { openInMemory(legacy.job, 'fallback', true); opened = true; }
+  if (!opened) { showStart(); if (s.jobs.length || legacyOffer) openJobsList(); if (markerNote) toast(markerNote); }
+  // the kept older-version job alone doesn't force Recover open at every boot
+  if (recoveryAll().some(r => r.kind !== 'legacy-kept')) openRecovery();
+  else if (legacyOffer) showLegacyOffer();
+  else if (noticeHidden) showLegacyNotice(legacy.job, notice);
 }
+// The last job opened, but the older-version job couldn't be added. Viewing it
+// writes nothing; it opens unsaved so it can be downloaded.
+function showLegacyNotice(oldJob, text) {
+  modal('Older-version job not added', [el('p', { 'data-testid': 'legacy-notice' }, text)], [
+    { label: 'Close', fn: closeModal },
+    { label: 'Open it to download', class: 'btn-primary', testid: 'legacy-notice-open', fn: () => { closeModal(); switchJobs(async () => { openInMemory(oldJob, 'unsaved', true, text); }); } },
+  ]);
+}
+bootJobs()
+  .catch(() => { if (!job) showStart(); toast('Saved jobs couldn’t be loaded. Nothing has been changed.'); })
+  .finally(() => { document.documentElement.dataset.jobsBoot = 'ready'; });
