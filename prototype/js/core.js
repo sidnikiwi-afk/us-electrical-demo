@@ -594,6 +594,38 @@ export function normaliseJobV2(job) {
   return out;
 }
 
+const DISGUISED_V1 = 'This backup has floor data under an older version number, so it can\u2019t be trusted.';
+
+function hasDisguisedGeometry(job) {
+  if (Object.prototype.hasOwnProperty.call(job, 'floor')) return true;
+  if (!Array.isArray(job.items)) return false;
+  return job.items.some(it => it && typeof it === 'object' && !Array.isArray(it)
+    && Object.prototype.hasOwnProperty.call(it, 'face'));
+}
+
+// Pure copy of a schema 1 job into schema 2 with an empty floor.
+// A floor block or a fitting face on schema 1 is invalid. This does not strip it.
+export function upgradeV1(job) {
+  if (!job || typeof job !== 'object' || Array.isArray(job)) return { ok: false, errors: ['not an object'] };
+  if (hasDisguisedGeometry(job)) return { ok: false, errors: [DISGUISED_V1] };
+  const v = validateJob(job);
+  if (!v.ok) return v;
+  let copy;
+  try { copy = JSON.parse(JSON.stringify(job)); } catch { return { ok: false, errors: ['not an object'] }; }
+  copy.schemaVersion = 2;
+  copy.floor = {
+    walls: [],
+    zones: [],
+    routes: [],
+    nextWallNo: 1,
+    nextZoneNo: 1,
+    nextRouteNo: 1,
+  };
+  const v2 = validateJobV2(copy);
+  if (!v2.ok) return v2;
+  return { ok: true, job: normaliseJobV2(copy) };
+}
+
 export function parseBackup(text) {
   // Untrusted input. Returns validateJob-style result; never throws.
   // Only schemaVersion 2 takes the floor path. Other versions, including
