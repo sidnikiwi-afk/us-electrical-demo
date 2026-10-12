@@ -1,7 +1,11 @@
 // Browser UI for the Surface drawing-to-labour prototype.
 // Plain ES modules, no dependencies, no outbound requests.
 import * as C from './core.js';
-import * as J from './jobs.js';
+import * as J from './jobs-v2.js';
+import * as F from './floor-zones.js';
+
+const BUILD = 'surface-proto-v13-floor-zones-20261012';
+const buildMixed = BUILD !== C.BUILD || BUILD !== J.BUILD;
 
 const NS = 'http://www.w3.org/2000/svg';
 
@@ -28,6 +32,7 @@ let savedCanon = null;    // contentKey() known to be in storage (null: none)
 const contentKey = () => J.canonical(job) + '\u0000' + JSON.stringify(jobPrefs);
 let openToken = 0;        // bumps on every open, so late save results never cross jobs
 let legacyOffer = null;   // older-version job waiting for "add it as a new job"
+let v1Offers = [];         // changed v1 jobs, offered one at a time
 let legacyMarkerUnreadable = false; // §4.1 skip: the older-version job is listed in Recover, download only
 let accessNote = '';      // why an 'unsaved' job has no record
 let staleCause = 'unknown'; // why access is 'stale': 'other-tab', 'own' (our save wasn't confirmed) or 'unknown'
@@ -36,9 +41,14 @@ let refusedNumber = null; // an invalid number refused when its field lost focus
 
 // ---- State ---------------------------------------------------------------
 let job = null;
-let mode = 'select';            // select | place | draw | notes
+let mode = 'select';            // select | place | draw | notes | build
 let view = 'PLAN';              // PLAN | A | B | C | D
 let selectedId = null;
+let zoneId = null;              // scope: null is the whole floor
+let zoneTool = null;            // { first: {x,y}|null } while Add zone is waiting for taps
+let zoneGesture = null;         // pointer that started a zone tap; committed on lift
+let zoneEdgeDrag = null;        // one edge handle; the job changes on lift only
+let lastZoneDetails = null;
 // "Set height for several" sub-state of the Select tool: multiIds is null when
 // off and an array of fitting IDs when on. multiDraft keeps the typed height
 // across panel rebuilds; multiPending holds a tap awaiting the 12-px threshold.
@@ -170,12 +180,18 @@ function toast(msg, ms = 2600) {
 
 // ---- History (undo/redo) ---------------------------------------------------
 function snapshot() { return JSON.stringify(job); }
-function commit(mutate) {
+function commit(mutate, opts = {}) {
   // Exception-safe: a mutation that throws (e.g. item cap) changes nothing and
-  // leaves no empty undo frame.
+  // leaves no empty undo frame. Zone edits pass exact so the refusal is the
+  // validator sentence on its own.
   const pre = snapshot();
   try { mutate(); }
-  catch (err) { toast(`Change not applied — ${err.message}`); renderAll(); return; }
+  catch (err) {
+    const msg = err && err.message ? err.message : 'That change was not applied.';
+    toast(opts.exact ? msg : `Change not applied — ${msg}`);
+    renderAll();
+    return false;
+  }
   history.push(pre);
   if (history.length > C.LIMITS.historyLimit) history.shift();
   redoStack = [];
@@ -185,6 +201,15 @@ function commit(mutate) {
   clearTimeout(sessionTimer); session = null;
   renderAll();
   scheduleSave();
+  return true;
+}
+function restoreJob(raw, current) {
+  const data = JSON.parse(raw);
+  const next = data && data.schemaVersion === 2 ? C.normaliseJobV2(data) : C.normaliseJob(data);
+  next.nextId = C.monotonicNextId(next, current);
+  if (data && data.schemaVersion === 2) C.monotonicFloorCounters(next, current);
+  if (zoneId && !F.zoneById(next, zoneId)) zoneId = null;
+  return next;
 }
 function undo() {
   clearDrafts(); // an uncommitted draft dies with the state it belonged to
@@ -192,8 +217,7 @@ function undo() {
   const prevRevision = job.revision;
   const current = job;
   redoStack.push(snapshot());
-  job = C.normaliseJob(JSON.parse(history.pop()));
-  job.nextId = C.monotonicNextId(job, current); // never reissue a fitting ID
+  job = restoreJob(history.pop(), current);
   selectedId = job.items.some(i => i.id === selectedId) ? selectedId : null;
   job.revision = Math.max(job.revision, prevRevision) + 1; // never reuse a revision number
   renderAll(); scheduleSave();
@@ -204,8 +228,7 @@ function redo() {
   const prevRevision = job.revision;
   const current = job;
   history.push(snapshot());
-  job = C.normaliseJob(JSON.parse(redoStack.pop()));
-  job.nextId = C.monotonicNextId(job, current);
+  job = restoreJob(redoStack.pop(), current);
   selectedId = job.items.some(i => i.id === selectedId) ? selectedId : null;
   job.revision = Math.max(job.revision, prevRevision) + 1;
   renderAll(); scheduleSave();
@@ -327,7 +350,7 @@ window.addEventListener('pagehide', (e) => {
   if (!job) return;
   flushDraft();
   clearTimeout(saveTimer);
-  if (jobsApi && contentKey() !== savedCanon) {
+  if (jobsApi && !buildMixed && contentKey() !== savedCanon) {
     // no dialog is possible here; rescue-full was surfaced while the page was active
     const kept = jobsApi.writeRescue({ writerTab, jobId: currentId, baseRev: currentId ? lastKnownRev : null, job });
     if (!kept.ok) rescueFullWarned = false; // warn again if this page comes back from the cache
@@ -406,6 +429,10 @@ function setChip(cls, text, onclick = null) {
 const NOT_SAVED_BACKUP = 'Not saved — storage full or blocked. Tap to download a backup.';
 async function runSave() {
   if (!job) return { ok: true };
+  if (buildMixed) {
+    setChip('err', 'Reload to finish updating');
+    return { ok: false, reason: 'mixed' };
+  }
   // A save that lands while a newer edit is still being typed must not stamp
   // over the typing/invalid chip state — not on entry, and especially not
   // with a false "Saved" on exit.
@@ -524,6 +551,15 @@ function staleText() {
 // The chip and banner always say what this tab can do with the open job.
 function showAccessState(extra = '') {
   const banner = $('#job-banner');
+  if (buildMixed) {
+    const acts = $('#job-banner-actions');
+    acts.innerHTML = '';
+    setChip('err', 'Reload to finish updating');
+    banner.hidden = false;
+    $('#job-banner-text').textContent = 'This page loaded parts of two app versions. Reload to finish updating. Nothing has been saved.';
+    syncFooterHeight();
+    return;
+  }
   const acts = $('#job-banner-actions');
   acts.innerHTML = '';
   const btn = (label, testid, fn) => {
@@ -597,6 +633,9 @@ function recoveryAll() {
     for (const j of s.jobs) if (!j.ok) out.push({ kind: 'job', key: j.key, raw: j.raw, reason: j.reason });
     for (const r of s.rescues) if (r.writerTab !== writerTab) out.push({ kind: 'rescue', key: r.key, raw: r.raw, data: r.data });
     for (const i of s.imports) out.push({ kind: 'import', key: i.key, raw: i.raw, data: i.data });
+  }
+  if (typeof jobsApi.listLegacyKept === 'function') {
+    for (const row of jobsApi.listLegacyKept()) out.push(row);
   }
   return out;
 }
@@ -691,6 +730,9 @@ function openRecovery() {
       if (rec.kind === 'legacy') text = `Older-version record (unreadable): ${recoveryReason(rec.raw)}. It’s kept as it is. Download only.`;
       else if (rec.kind === 'legacy-kept') text = 'Older-version job, not added to your jobs because its upgrade record can’t be read. Both are kept as they are. Download only.';
       else if (rec.kind === 'job') text = `Unreadable job: ${rec.reason}. It’s kept as it is and still counts towards the ${J.MAX_JOBS}-job limit.`;
+      else if (rec.kind === 'v1-job') text = `From the older version (kept as it is): ${rec.reason || 'unreadable job'}. Download only.`;
+      else if (rec.kind === 'v1-rescue') text = 'From the older version (kept as it is): unsaved changes. Download only, or open a copy as a new job. The older copy stays.';
+      else if (rec.kind === 'v1-import') text = 'From the older version (kept as it is): an import record. Download only.';
       else if (rec.kind === 'rescue') {
         text = rec.data
           ? `Unsaved changes kept when a page closed: “${rec.data.job.name}”, ${rec.data.at ? new Date(rec.data.at).toLocaleString('en-GB') : 'time unknown'}.`
@@ -701,6 +743,11 @@ function openRecovery() {
           : 'Incomplete import record that can’t be read.';
       }
       row.appendChild(el('p', {}, text));
+      if (rec.kind === 'v1-rescue') {
+        const openOld = el('button', { 'data-testid': `recovery-open-${i}` }, 'Open as new job');
+        openOld.addEventListener('click', () => { closeModal(); openLegacyRescue(rec.key); });
+        btns.appendChild(openOld);
+      }
       if (rec.kind === 'rescue' && rec.data) {
         const open = el('button', { 'data-testid': `recovery-open-${i}` }, 'Open as new job');
         open.addEventListener('click', () => { closeModal(); openRescueAsNew(rec.key); });
@@ -953,6 +1000,50 @@ function fittingGlyph(item, x, y, labelBelow = true) {
 // are always drawn: they belong to every layer.
 function renderPlan(content, { W, D }, show = isShown) {
   svgEl('rect', { x: 0, y: 0, width: W, height: D, fill: '#fff', stroke: '#1a1a1a', 'stroke-width': 25 }, content);
+  for (const z of F.zonesOf(job)) {
+    const on = z.id === zoneId;
+    const live = zoneEdgeDrag && zoneEdgeDrag.zoneId === z.id && zoneEdgeDrag.live ? zoneEdgeDrag.live : z;
+    svgEl('rect', {
+      x: live.x0, y: live.y0, width: Math.max(0, live.x1 - live.x0), height: Math.max(0, live.y1 - live.y0),
+      fill: on ? 'rgba(35,50,77,0.16)' : 'rgba(35,50,77,0.08)',
+      stroke: on ? '#23324d' : '#7d8da6', 'stroke-width': on ? 36 : 18,
+      class: 'zone-rect', 'data-zone': z.id,
+    }, content);
+    if (!on) continue;
+    for (const face of F.positiveFaces(job.room, z)) {
+      const seg = faceMark(face, { W, D });
+      if (!seg) continue;
+      svgEl('line', {
+        x1: seg.x1, y1: seg.y1, x2: seg.x2, y2: seg.y2,
+        stroke: '#b45309', 'stroke-width': 70, 'stroke-linecap': 'butt',
+        class: 'zone-face-mark', 'data-wall': face.wall,
+      }, content);
+    }
+    if (mode === 'select' && content.ownerSVGElement && content.ownerSVGElement.id === 'canvas') {
+      const hit = screenMm(44);
+      const mid = {
+        n: { x: (live.x0 + live.x1) / 2, y: live.y0 },
+        e: { x: live.x1, y: (live.y0 + live.y1) / 2 },
+        s: { x: (live.x0 + live.x1) / 2, y: live.y1 },
+        w: { x: live.x0, y: (live.y0 + live.y1) / 2 },
+      };
+      for (const edge of ['n', 'e', 's', 'w']) {
+        const h = mid[edge];
+        svgEl('rect', {
+          x: h.x - hit / 2, y: h.y - hit / 2, width: hit, height: hit,
+          fill: 'transparent', stroke: 'none', class: 'zone-handle',
+          'data-edge': edge, 'data-testid': `zone-handle-${edge}`,
+        }, content);
+        svgEl('rect', {
+          x: h.x - 50, y: h.y - 50, width: 100, height: 100,
+          fill: '#fff', stroke: '#23324d', 'stroke-width': 16, 'pointer-events': 'none',
+        }, content);
+      }
+    }
+  }
+  if (zoneTool && zoneTool.first) {
+    svgEl('circle', { cx: zoneTool.first.x, cy: zoneTool.first.y, r: 70, fill: '#23324d' }, content);
+  }
   // wall labels: one label per wall, each with its length
   const dims = [
     { x: W / 2, y: -260, text: `Wall A · ${job.room.widthM.toFixed(2)} m`, wall: 'A' },
@@ -997,13 +1088,68 @@ function renderPlan(content, { W, D }, show = isShown) {
   return { margin: 500 };
 }
 
+function zoneFaceFor(wall) {
+  if (!zoneId || !job) return null;
+  const z = F.zoneById(job, zoneId);
+  if (!z) return null;
+  return F.positiveFaces(job.room, z).find(face => face.wall === wall) || null;
+}
+function faceMark(face, { W, D }) {
+  if (face.wall === 'A') return { x1: face.fromMm, y1: 0, x2: face.toMm, y2: 0 };
+  if (face.wall === 'B') return { x1: W, y1: face.fromMm, x2: W, y2: face.toMm };
+  if (face.wall === 'C') return { x1: W - face.toMm, y1: D, x2: W - face.fromMm, y2: D };
+  if (face.wall === 'D') return { x1: 0, y1: D - face.toMm, x2: 0, y2: D - face.fromMm };
+  return null;
+}
+function selectionVisible(id, nextZoneId) {
+  const it = job && job.items.find(i => i.id === id);
+  if (!it || !isShown(it)) return false;
+  if (!nextZoneId) return true;
+  const z = F.zoneById(job, nextZoneId);
+  if (!z) return false;
+  if (it.wall === C.CEILING) return it.fromLeftMm >= z.x0 && it.fromLeftMm <= z.x1 && it.heightMm >= z.y0 && it.heightMm <= z.y1;
+  const face = F.positiveFaces(job.room, z).find(f => f.wall === it.wall);
+  return !!(face && F.fittingOnFace(it, face));
+}
 function renderWall(content, wall, { W, D, H }, forPrint = false, show = isShown) {
-  const L = (wall === 'A' || wall === 'C') ? W : D;
-  svgEl('line', { x1: 0, y1: H, x2: L, y2: H, stroke: '#1a1a1a', 'stroke-width': 40 }, content); // floor line
-  const hT = svgEl('text', { x: L + 380, y: H / 2, 'font-size': 240, fill: '#555', 'font-family': 'inherit', 'text-anchor': 'middle', transform: `rotate(-90 ${L + 380} ${H / 2})` }, content);
+  const fullL = (wall === 'A' || wall === 'C') ? W : D;
+  const face = forPrint ? null : zoneFaceFor(wall);
+  const x0 = face ? face.fromMm : 0;
+  const x1 = face ? face.toMm : fullL;
+  const L = fullL;
+  svgEl('line', { x1: x0, y1: H, x2: x1, y2: H, stroke: '#1a1a1a', 'stroke-width': 40 }, content); // floor line
+  const hT = svgEl('text', { x: x1 + 380, y: H / 2, 'font-size': 240, fill: '#555', 'font-family': 'inherit', 'text-anchor': 'middle', transform: `rotate(-90 ${x1 + 380} ${H / 2})` }, content);
   hT.textContent = `${job.room.heightM.toFixed(2)} m`;
-  const lT = svgEl('text', { x: L / 2, y: H + 420, 'font-size': 260, fill: '#23324d', 'text-anchor': 'middle', 'font-family': 'inherit' }, content);
-  lT.textContent = `Wall ${wall} · ${(L / 1000).toFixed(2)} m — viewed from inside`;
+  const lT = svgEl('text', { x: (x0 + x1) / 2, y: H + 420, 'font-size': 220, fill: '#23324d', 'text-anchor': 'middle', 'font-family': 'inherit', 'data-testid': 'wall-caption' }, content);
+  if (face) {
+    const z = activeZone();
+    lT.textContent = `${z ? z.name : 'Zone'} · Wall ${wall} · ${(face.fromMm / 1000).toFixed(2)} to ${(face.toMm / 1000).toFixed(2)} m of ${(fullL / 1000).toFixed(2)} m`;
+    svgEl('rect', {
+      x: x0, y: 0, width: Math.max(1, x1 - x0), height: H,
+      fill: '#fff', stroke: '#1a1a1a', 'stroke-width': 25,
+    }, content);
+    for (const mm of [face.fromMm, face.toMm]) {
+      svgEl('line', { x1: mm, y1: H, x2: mm, y2: H + 120, stroke: '#23324d', 'stroke-width': 12 }, content);
+      const tick = svgEl('text', { x: mm, y: H + 280, 'font-size': 160, fill: '#23324d', 'text-anchor': 'middle', 'data-testid': 'wall-ruler' }, content);
+      tick.textContent = `${(mm / 1000).toFixed(2)} m`;
+    }
+    if (face.fromMm > 0) {
+      const c = svgEl('text', { x: x0, y: -80, 'font-size': 180, fill: '#555', 'data-testid': 'wall-continues' }, content);
+      c.textContent = 'Wall continues';
+    }
+    if (face.toMm < fullL) {
+      const c = svgEl('text', { x: x1, y: -80, 'font-size': 180, fill: '#555', 'text-anchor': 'end', 'data-testid': 'wall-continues' }, content);
+      c.textContent = 'Wall continues';
+    }
+    const outside = job.items.filter(i => i.wall === wall && !F.fittingOnFace(i, face));
+    if (outside.length) {
+      const note = svgEl('text', { x: (x0 + x1) / 2, y: -280, 'font-size': 170, fill: '#23324d', 'text-anchor': 'middle', 'data-testid': 'wall-outside' }, content);
+      const n = outside.length;
+      note.textContent = `${n} ${n === 1 ? 'fitting is' : 'fittings are'} outside this zone. Choose Whole floor to see them.`;
+    }
+  } else {
+    lT.textContent = `Wall ${wall} · ${(fullL / 1000).toFixed(2)} m — viewed from inside`;
+  }
   for (const item of job.items) {
     if (!show(item)) continue;
     if (item.wall === C.CEILING) {
@@ -1021,23 +1167,33 @@ function renderWall(content, wall, { W, D, H }, forPrint = false, show = isShown
         C: W - item.fromLeftMm,
         D: D - item.heightMm,
       }[wall];
+      if (face && (along < face.fromMm || along > face.toMm)) continue;
       svgEl('line', { x1: along, y1: 0, x2: along, y2: 120, stroke: '#999', 'stroke-width': 25, 'stroke-dasharray': '60 40' }, content);
       const t = svgEl('text', { x: along, y: -140, 'font-size': 150, fill: '#777', 'text-anchor': 'middle', 'font-family': 'inherit' }, content);
       t.textContent = `${item.id}·${C.TYPES[item.type].symbol} (ceiling)`;
       continue;
     }
     if (item.wall !== wall) continue;
+    if (face && !F.fittingOnFace(item, face)) continue;
     content.appendChild(fittingGlyph(item, item.fromLeftMm, H - item.heightMm));
     if (item.id === selectedId) {
-      svgEl('line', { x1: 0, y1: H - item.heightMm, x2: item.fromLeftMm, y2: H - item.heightMm, stroke: '#b26a00', 'stroke-width': 18, 'stroke-dasharray': '80 50' }, content);
+      svgEl('line', { x1: face ? face.fromMm : 0, y1: H - item.heightMm, x2: item.fromLeftMm, y2: H - item.heightMm, stroke: '#b26a00', 'stroke-width': 18, 'stroke-dasharray': '80 50' }, content);
       svgEl('line', { x1: item.fromLeftMm, y1: H, x2: item.fromLeftMm, y2: H - item.heightMm, stroke: '#b26a00', 'stroke-width': 18, 'stroke-dasharray': '80 50' }, content);
     }
+  }
+  let clipId = null;
+  if (face) {
+    clipId = `zone-face-clip-${wall}`;
+    const defs = svgEl('defs', {}, content);
+    const cp = svgEl('clipPath', { id: clipId }, defs);
+    svgEl('rect', { x: x0, y: -2000, width: Math.max(1, x1 - x0), height: H + 4000 }, cp);
   }
   for (const s of job.annotations[wall] || []) {
     const pl = svgEl('polyline', { points: s.points.map(pt => pt.join(',')).join(' '), fill: 'none', stroke: '#2266cc', 'stroke-width': 25, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', class: 'stroke' }, content);
     pl.setAttribute('data-index', job.annotations[wall].indexOf(s));
+    if (clipId) pl.setAttribute('clip-path', `url(#${clipId})`);
   }
-  return { L, H };
+  return { L, H, fromMm: x0, toMm: x1 };
 }
 
 function renderCanvas() {
@@ -1045,16 +1201,29 @@ function renderCanvas() {
   svg.innerHTML = '';
   if (!job || !job.room || !job.room.widthM) { svg.setAttribute('viewBox', '0 0 100 100'); renderLayerEmpty(); return; }
   const dims = roomMm();
-  let vbW, vbH;
+  let vbX = -900, vbY = -900, vbW, vbH;
+  const clipFace = view === 'PLAN' ? null : zoneFaceFor(view);
   if (view === 'PLAN') { vbW = dims.W + 1800; vbH = dims.D + 1800; }
-  else { const L = (view === 'A' || view === 'C') ? dims.W : dims.D; vbW = L + 1800; vbH = dims.H + 1800; }
-  svg.setAttribute('viewBox', `${-900} ${-900} ${vbW} ${vbH}`);
+  else if (clipFace) {
+    const span = Math.max(100, clipFace.toMm - clipFace.fromMm);
+    vbX = clipFace.fromMm - 900;
+    vbW = span + 1800;
+    vbH = dims.H + 1800;
+  } else {
+    const L = (view === 'A' || view === 'C') ? dims.W : dims.D;
+    vbW = L + 1800; vbH = dims.H + 1800;
+  }
+  svg.setAttribute('viewBox', `${vbX} ${vbY} ${vbW} ${vbH}`);
   const world = svgEl('g', { id: 'world', transform: `translate(${zoom.tx} ${zoom.ty}) scale(${zoom.s})` }, svg);
   const content = svgEl('g', {}, world);
   if (view === 'PLAN') renderPlan(content, dims);
   else renderWall(content, view, dims);
   // note pins
-  const pins = (job.notePins || []).filter(p => p.view === view);
+  const pins = (job.notePins || []).filter(p => {
+    if (p.view !== view) return false;
+    if (!clipFace) return true;
+    return p.x >= clipFace.fromMm && p.x <= clipFace.toMm && p.y >= -200 && p.y <= dims.H + 200;
+  });
   for (const p of pins) {
     const g = svgEl('g', { transform: `translate(${p.x},${p.y})`, class: 'note-pin', 'data-id': p.id }, content);
     svgEl('circle', { cx: 0, cy: 0, r: 160, fill: '#fff3cd', stroke: '#8a7a2a', 'stroke-width': 20 }, g);
@@ -1080,7 +1249,8 @@ function renderCanvas() {
       + (placeLayerHidden ? ` Its layer (${C.LAYER_LABELS[placeLayer]}) is hidden and will be shown when you place it.` : ''),
     draw: 'Sketches are notes only, shared by all layers. They are never priced.',
     notes: 'Tap to add a note. Notes are shared by all layers.',
-  }[mode];
+    build: zoneTool ? 'Tap two corners on the plan. The second tap adds the zone.' : 'Add a zone by two taps, or enter its size.',
+  }[mode] || '';
   renderLayerEmpty();
 }
 
@@ -1165,23 +1335,74 @@ function renderLayers() {
 }
 
 // ---- Tabs, quote bar, inspector ----------------------------------------------
+function activeZone() { return zoneId ? F.zoneById(job, zoneId) : null; }
+function renderZoneNotes(host) {
+  const notes = el('div', { class: 'zone-notes', 'data-testid': 'zone-notes' });
+  const z = activeZone();
+  const faces = z ? F.positiveFaces(job.room, z) : [];
+  if (!z) notes.appendChild(el('p', {}, '\u00a0'));
+  else if (!faces.length) notes.appendChild(el('p', {}, 'This zone has no walls yet. Add one in Build mode.'));
+  else {
+    const lines = F.edgeNotes(z, faces);
+    if (!lines.length) notes.appendChild(el('p', {}, 'Every edge of this zone meets an outside wall.'));
+    else for (const line of lines) notes.appendChild(el('p', {}, line));
+  }
+  host.appendChild(notes);
+}
 function renderTabs() {
   const tabs = $('#view-tabs');
   tabs.innerHTML = '';
   if (!job) return;
+  const sel = el('select', { 'data-testid': 'zone-select', 'aria-label': 'Zones', class: 'zone-select' });
+  sel.appendChild(el('option', { value: '' }, 'Whole floor'));
+  for (const z of F.zonesOf(job)) sel.appendChild(el('option', { value: z.id }, z.name));
+  sel.appendChild(el('option', { value: '__new__' }, 'New zone…'));
+  sel.value = activeZone() ? zoneId : '';
+  sel.addEventListener('change', () => {
+    if (sel.value === '__new__') {
+      zoneId = null;
+      view = 'PLAN';
+      zoneTool = { first: null };
+      setMode('build');
+      renderAll();
+      return;
+    }
+    const nextZone = sel.value || null;
+    if (selectedId && !selectionVisible(selectedId, nextZone)) selectedId = null;
+    zoneId = nextZone;
+    if (zoneId && PHONE.matches) inspectorCollapsed = true;
+    const z = activeZone();
+    if (z && view !== 'PLAN' && !F.positiveFaces(job.room, z).some(face => face.wall === view)) view = 'PLAN';
+    renderAll();
+  });
+  tabs.appendChild(sel);
+  const faces = el('div', { class: 'face-row' });
+  tabs.appendChild(faces);
   // With a layer filter on, counts read "shown/total" so hidden fittings stay obvious.
   const filtered = !allShown();
   const count = (list) => {
     const shown = list.filter(isShown).length;
     return { text: filtered ? `${shown}/${list.length}` : String(list.length), title: filtered ? `${shown} of ${list.length} fittings shown` : '' };
   };
-  const ceilItems = job.items.filter(i => i.wall === C.CEILING);
-  const defs = ['PLAN', 'A', 'B', 'C', 'D'].map(v => {
-    // wall tabs count fittings mounted on that wall only; downlights are
-    // ceiling fittings (shown in plan and as projection ticks on wall views)
-    const c = count(v === 'PLAN' ? job.items : job.items.filter(i => i.wall === v));
-    return { v, label: v === 'PLAN' ? `Plan (${c.text})` : `Wall ${v} (${c.text})`, title: c.title };
+  const zScope = activeZone();
+  const scopedFaces = zScope ? F.positiveFaces(job.room, zScope) : null;
+  const ceilItems = job.items.filter(i => {
+    if (i.wall !== C.CEILING) return false;
+    if (!zScope) return true;
+    return i.fromLeftMm >= zScope.x0 && i.fromLeftMm <= zScope.x1 && i.heightMm >= zScope.y0 && i.heightMm <= zScope.y1;
   });
+  const wallDefs = scopedFaces
+    ? scopedFaces.map(face => ({ v: face.wall, items: job.items.filter(i => F.fittingOnFace(i, face)) }))
+    : ['A', 'B', 'C', 'D'].map(v => ({ v, items: job.items.filter(i => i.wall === v) }));
+  const planItems = scopedFaces
+    ? job.items.filter(i => i.wall === C.CEILING ? ceilItems.includes(i) : scopedFaces.some(face => F.fittingOnFace(i, face)))
+    : job.items;
+  const planCount = count(planItems);
+  const defs = [{ v: 'PLAN', label: `Plan (${planCount.text})`, title: planCount.title }];
+  for (const wall of wallDefs) {
+    const c = count(wall.items);
+    defs.push({ v: wall.v, label: `Wall ${wall.v} (${c.text})`, title: c.title });
+  }
   if (ceilItems.length) defs.push({ v: null, label: `Ceiling fittings: ${count(ceilItems).text} (plan only)`, info: true });
   for (const d of defs) {
     if (d.info) {
@@ -1191,13 +1412,15 @@ function renderTabs() {
     const b = el('button', { 'data-view': d.v, 'data-testid': `tab-${d.v}`, class: view === d.v ? 'active' : '' }, d.label);
     if (d.title) b.title = d.title;
     b.addEventListener('click', () => {
+      if (zoneTool && zoneTool.first) zoneTool = { first: null };
       view = d.v;
       // a copied downlight can only go on the ceiling in the plan view
       if (copyTpl && copyTpl.type === 'downlight' && view !== 'PLAN' && endCopy()) toast('Stopped placing copies. Downlights can only be copied in the plan view.');
       renderAll();
     });
-    tabs.appendChild(b);
+    faces.appendChild(b);
   }
+  renderZoneNotes(tabs);
 }
 
 function renderQuote() {
@@ -1263,6 +1486,140 @@ function inspectorToggle() {
   return toggle;
 }
 
+function readWholeMm(input) {
+  const raw = String(input.value).trim();
+  if (!/^-?\d+$/.test(raw)) return null;
+  return Number(raw);
+}
+function applyZoneEdits(z, fields, onDone) {
+  const name = fields.name.value;
+  const x0 = readWholeMm(fields.x0);
+  const y0 = readWholeMm(fields.y0);
+  const width = readWholeMm(fields.width);
+  const depth = readWholeMm(fields.depth);
+  if (x0 === null || y0 === null || width === null || depth === null) {
+    toast('Enter whole millimetres.');
+    return;
+  }
+  const before = snapshot();
+  const ok = commit(() => {
+    C.replaceZone(job, z.id, { name, x0, y0, x1: x0 + width, y1: y0 + depth });
+  }, { exact: true });
+  if (!ok || snapshot() === before) return;
+  toast(`Updated ${name.trim() || z.name}.`);
+  if (onDone) onDone();
+}
+function addZoneFromFields(fields) {
+  const name = fields.name.value;
+  const x0 = readWholeMm(fields.x0);
+  const y0 = readWholeMm(fields.y0);
+  const width = readWholeMm(fields.width);
+  const depth = readWholeMm(fields.depth);
+  if (x0 === null || y0 === null || width === null || depth === null) {
+    toast('Enter whole millimetres.');
+    return false;
+  }
+  let id = null;
+  commit(() => {
+    id = C.addZone(job, { name, x0, y0, x1: x0 + width, y1: y0 + depth });
+    zoneId = id;
+    if (selectedId && !selectionVisible(selectedId, id)) selectedId = null;
+  }, { exact: true });
+  if (!id || !F.zoneById(job, id)) return false;
+  const made = F.zoneById(job, id);
+  toast(`Added ${made.name}. Undo removes it.`);
+  focusZoneName();
+  return true;
+}
+function focusZoneName() {
+  if (PHONE.matches) {
+    inspectorCollapsed = true;
+    renderAll();
+    return;
+  }
+  inspectorCollapsed = false;
+  renderAll();
+  const input = document.querySelector('#inspector [data-testid="zone-name"]');
+  if (input) input.focus({ preventScroll: true });
+}
+function zoneField(labelText, testid, value, numeric) {
+  const input = el('input', numeric
+    ? { type: 'number', inputmode: 'numeric', step: '1', 'data-testid': testid }
+    : { type: 'text', maxlength: '60', 'data-testid': testid });
+  input.value = value;
+  return input;
+}
+function openZoneSizeForm() {
+  const box = el('div');
+  const fields = {
+    name: zoneField('Name', 'zone-name', '', false),
+    x0: zoneField('From west (mm)', 'zone-x0', '', true),
+    y0: zoneField('From north (mm)', 'zone-y0', '', true),
+    width: zoneField('Width (mm)', 'zone-width', '', true),
+    depth: zoneField('Depth (mm)', 'zone-depth', '', true),
+  };
+  for (const [labelText, input] of [['Name', fields.name], ['From west (mm)', fields.x0], ['From north (mm)', fields.y0], ['Width (mm)', fields.width], ['Depth (mm)', fields.depth]]) {
+    box.appendChild(el('label', {}, labelText));
+    box.appendChild(input);
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      if (addZoneFromFields(fields)) closeModal();
+    });
+  }
+  modal('Zone size', [box], [
+    { label: 'Cancel', fn: closeModal },
+    { label: 'Add', class: 'btn-primary', testid: 'zone-apply', fn: () => { if (addZoneFromFields(fields)) closeModal(); } },
+  ]);
+}
+function inspectorZonePanel() {
+  const z = activeZone();
+  const box = $('#inspector');
+  box.innerHTML = '';
+  const head = el('div', { class: 'inspector-head' });
+  head.append(el('h2', {}, z ? z.name : 'Zone'), inspectorToggle());
+  box.appendChild(head);
+  if (!z || inspectorCollapsed) return;
+  const fields = {
+    name: zoneField('Name', 'zone-name', z.name, false),
+    x0: zoneField('From west (mm)', 'zone-x0', String(z.x0), true),
+    y0: zoneField('From north (mm)', 'zone-y0', String(z.y0), true),
+    width: zoneField('Width (mm)', 'zone-width', String(z.x1 - z.x0), true),
+    depth: zoneField('Depth (mm)', 'zone-depth', String(z.y1 - z.y0), true),
+  };
+  const apply = () => applyZoneEdits(z, fields);
+  for (const [labelText, input] of [['Name', fields.name], ['From west (mm)', fields.x0], ['From north (mm)', fields.y0], ['Width (mm)', fields.width], ['Depth (mm)', fields.depth]]) {
+    box.appendChild(el('label', {}, labelText));
+    box.appendChild(input);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply(); } });
+  }
+  const go = el('button', { class: 'btn-primary', 'data-testid': 'zone-apply' }, 'Apply');
+  go.addEventListener('click', apply);
+  box.appendChild(go);
+  const facts = F.zoneFacts(job, z);
+  box.appendChild(el('p', { 'data-testid': 'zone-facts' },
+    `Facts: ${facts.faces} wall ${facts.faces === 1 ? 'face' : 'faces'}, ${facts.bareEdges} ${facts.bareEdges === 1 ? 'edge' : 'edges'} without a wall, ${facts.fittings} ${facts.fittings === 1 ? 'fitting' : 'fittings'}`));
+  const showWalls = el('button', { 'data-testid': 'zone-show-walls' }, 'Show its walls');
+  showWalls.addEventListener('click', () => {
+    const first = F.positiveFaces(job.room, z)[0];
+    view = first ? first.wall : 'PLAN';
+    if (PHONE.matches) inspectorCollapsed = true;
+    renderAll();
+  });
+  box.appendChild(showWalls);
+  const remove = el('button', { class: 'btn-danger', 'data-testid': 'zone-remove' }, 'Remove zone');
+  remove.addEventListener('click', () => {
+    const id = z.id;
+    const name = z.name;
+    const before = snapshot();
+    commit(() => { C.removeZone(job, id); }, { exact: true });
+    if (snapshot() === before) return;
+    if (zoneId === id) zoneId = null;
+    toast(`Removed zone ${name}. Undo brings it back.`);
+    renderAll();
+  });
+  box.appendChild(remove);
+}
 function inspectorRoomPanel() {
   const box = $('#inspector');
   box.innerHTML = '';
@@ -1276,7 +1633,7 @@ function inspectorRoomPanel() {
   if (job.room && job.room.widthM) {
     box.appendChild(el('p', {}, `${job.room.widthM.toFixed(2)} × ${job.room.depthM.toFixed(2)} × ${job.room.heightM.toFixed(2)} m (w × d × h)`));
   }
-  const sizeBtn = el('button', { 'data-testid': 'room-size', class: 'btn-primary' }, 'Room size');
+  const sizeBtn = el('button', { 'data-testid': 'room-size', class: 'btn-primary' }, 'Floor size');
   sizeBtn.addEventListener('click', openRoomForm);
   box.appendChild(sizeBtn);
   const multiBtn = el('button', { 'data-testid': 'multi-start-room' }, 'Set height for several');
@@ -1417,7 +1774,11 @@ function renderInspector() {
   document.body.classList.toggle('inspector-collapsed', inspectorCollapsed);
   if (multiIds) { inspectorMultiPanel(); return; }
   const item = job.items.find(i => i.id === selectedId);
-  if (!item) { inspectorRoomPanel(); return; }
+  if (!item) {
+    if (activeZone()) { inspectorZonePanel(); return; }
+    inspectorRoomPanel();
+    return;
+  }
   const box = $('#inspector');
   box.innerHTML = '';
   const toggle = inspectorToggle();
@@ -1606,14 +1967,18 @@ function renderAll() {
   // Not while a pointer is still down on the fitting: unfolding resizes the
   // drawing mid-gesture and the drag would land far from the finger. The lift's
   // renderAll unfolds it instead.
-  if (!dragFitting) {
+  const zNow = activeZone();
+  if (zNow && view !== 'PLAN' && !F.positiveFaces(job.room, zNow).some(face => face.wall === view)) view = 'PLAN';
+  if (!dragFitting && !zoneEdgeDrag && !panning) {
     if (selectedId && selectedId !== lastDetailsId && mode === 'select' && !PHONE.matches && !multiIds) inspectorCollapsed = false;
+    if (!selectedId && zoneId && zoneId !== lastZoneDetails && !PHONE.matches && !multiIds) inspectorCollapsed = false;
     lastDetailsId = selectedId;
+    lastZoneDetails = zoneId;
   }
   // A rebuild of the same panel (a save, a layer change) keeps the reader's
   // scroll position; a different panel starts at the top.
   const insBox = $('#inspector');
-  const insKey = `${currentId}|${selectedId}|${multiIds ? 'multi' : ''}|${inspectorCollapsed}`;
+  const insKey = `${currentId}|${selectedId}|${zoneId || ''}|${multiIds ? 'multi' : ''}|${inspectorCollapsed}`;
   const keepTop = insKey === lastInspectorKey ? insBox.scrollTop : 0;
   lastInspectorKey = insKey;
   renderTabs(); renderLayers(); renderCanvas(); renderInspector(); renderQuote();
@@ -1656,7 +2021,7 @@ function openRoomForm() {
   mk('heightM', 'Height (m)', C.LIMITS.maxHeightM);
   const errP = el('p', { class: 'field-err' }); errP.hidden = true; box.appendChild(errP);
   const isEdited = () => ['widthM', 'depthM', 'heightM'].some(k => fields[k].input.value !== initial[k]);
-  guardedForm('Room size', [box], [
+  guardedForm('Floor size', [box], [
     { label: 'Cancel', fn: closeModal },
     {
       label: 'Save', class: 'btn-primary', testid: 'room-save', fn: () => {
@@ -1671,6 +2036,8 @@ function openRoomForm() {
           }
           vals[k] = Math.round(v * 100) / 100;
         }
+        const zoneBlock = F.outsideFloorMessage(job, vals.widthM, vals.depthM);
+        if (zoneBlock) { errP.hidden = false; errP.textContent = zoneBlock; return; }
         const outside = C.itemsOutside(job, vals.widthM, vals.depthM, vals.heightM);
         if (outside.length) { closeModal(); askShrink(vals, outside); return; }
         commit(() => { job.room = vals; });
@@ -2034,7 +2401,7 @@ function openMenu() {
     ...(hasRecovery() ? [['Recover saved data', () => { closeModal(); openRecovery(); }]] : []),
     ['Jobs', () => { closeModal(); openJobsList(); }],
     ['New job', () => { closeModal(); confirmNewJob(); }],
-    ['Room size', () => { closeModal(); openRoomForm(); }],
+    ['Floor size', () => { closeModal(); openRoomForm(); }],
     ['Rates for this job', () => { closeModal(); openRates(); }],
     ['Download backup (JSON)', () => { closeModal(); downloadBackup(); }],
     ['Download all jobs', () => { closeModal(); downloadAllJobs(); }],
@@ -2096,7 +2463,7 @@ function openNewJobForm() {
           }
           vals[k] = Math.round(v * 100) / 100;
         }
-        const j = C.blankJob(name.value.trim() || 'Untitled room');
+        const j = C.blankJobV2(name.value.trim() || 'Untitled room');
         j.room = vals;
         closeModal();
         startNewJob(j, { kind: 'new' });
@@ -2128,12 +2495,14 @@ function beginJob(j, prefs = null) {
   clearDrafts(); // a pending draft belongs to the job being left, never this one
   clearTimeout(saveTimer);
   refusedNumber = null;
-  job = C.normaliseJob(j); history = []; redoStack = []; selectedId = null; view = 'PLAN'; zoom = { s: 1, tx: 0, ty: 0 }; multiIds = null; multiDraft = ''; multiPending = null;
+  job = j && j.schemaVersion === 2 ? C.normaliseJobV2(j) : C.normaliseJob(j);
+  history = []; redoStack = []; selectedId = null; zoneId = null; zoneTool = null; zoneGesture = null; view = 'PLAN'; zoom = { s: 1, tx: 0, ty: 0 }; multiIds = null; multiDraft = ''; multiPending = null;
   shownLayers = new Set(C.LAYERS); layersOpen = false;
   // remembered type and heights belong to this job; copy mode never crosses jobs
   jobPrefs = J.cleanPrefs(prefs);
   placeType = jobPrefs.lastType ?? 'surface';
   copyTpl = null;
+  setMode('select');
   buildPalette();
   $('#start').hidden = true; $('#app').hidden = false;
   renderAll();
@@ -2282,10 +2651,23 @@ function createFailText(r) {
 function jobNotAdded(r) {
   modal('Job not added', [el('p', { 'data-testid': 'create-refused' }, createFailText(r))], [{ label: 'Close', class: 'btn-primary', fn: closeModal }]);
 }
+function asSchema2(raw) {
+  if (raw && raw.schemaVersion === 2) {
+    const v = C.validateJobV2(raw);
+    return v.ok ? { ok: true, job: C.normaliseJobV2(v.job) } : v;
+  }
+  if (raw && raw.schemaVersion === 1) return C.upgradeV1(raw);
+  return { ok: false, errors: ['This backup was made by a newer version of this app.'] };
+}
 async function startNewJob(j, origin, okMsg = '') {
+  const prepared = asSchema2(j);
+  if (!prepared.ok) {
+    modal('Job not added', [el('p', { 'data-testid': 'create-refused' }, `${prepared.errors[0]} Nothing was added.`)], [{ label: 'Close', class: 'btn-primary', fn: closeModal }]);
+    return;
+  }
   await switchJobs(async () => {
-    if (!jobsApi.canWrite) { openInMemory(j, 'fallback', false); if (okMsg) toast(okMsg, 5000); return; }
-    const r = await jobsApi.create({ job: j, origin, writerTab });
+    if (!jobsApi.canWrite) { openInMemory(prepared.job, 'fallback', false); if (okMsg) toast(okMsg, 5000); return; }
+    const r = await jobsApi.create({ job: prepared.job, origin, writerTab });
     if (!r.ok) { jobNotAdded(r); return; }
     await openRecord(r.jobId, okMsg);
   });
@@ -2307,6 +2689,15 @@ function confirmReloadSaved() {
     { label: 'Download this version', fn: () => downloadBackup() },
     { label: 'Reload saved version', class: 'btn-danger', testid: 'reload-confirm', fn: async () => { closeModal(); if (currentId) await openRecord(currentId); } },
   ]);
+}
+async function openLegacyRescue(key) {
+  await switchJobs(async () => {
+    const r = await jobsApi.promoteLegacyKept({ key, writerTab });
+    if (!r.ok) { jobNotAdded(r); return; }
+    await openRecord(r.jobId, r.existing
+      ? 'That older copy is already in your list, so it was opened. The older copy was left as it is.'
+      : 'Opened a copy of the older changes as a new job. The older copy was left as it is.');
+  });
 }
 async function openRescueAsNew(key) {
   await switchJobs(async () => {
@@ -2386,6 +2777,21 @@ function showLegacyOffer() {
     { label: 'Add as new job', class: 'btn-primary', testid: 'legacy-offer-accept', fn: acceptLegacyOffer },
   ]);
 }
+function showNextV1Offer() {
+  const offer = v1Offers[0];
+  if (!offer) return;
+  modal('Older job changed', [el('p', {}, offer.message)], [
+    { label: 'Not now', testid: 'v1-offer-skip', fn: () => { v1Offers.shift(); closeModal(); showNextV1Offer(); } },
+    { label: 'Add as separate job', class: 'btn-primary', testid: 'v1-offer-accept', fn: async () => {
+      const id = offer.v1JobId;
+      closeModal();
+      const r = await jobsApi.reconcileV1({ writerTab, acceptId: id });
+      v1Offers = (r && Array.isArray(r.offers)) ? r.offers.slice() : v1Offers.filter(item => item.v1JobId !== id);
+      toast(r && r.copied ? 'Added that older version as a separate job.' : 'That older version was not added.');
+      showNextV1Offer();
+    } },
+  ]);
+}
 async function acceptLegacyOffer() {
   closeModal();
   const r = await jobsApi.reconcileLegacy({ writerTab, accept: true });
@@ -2426,7 +2832,12 @@ $('#file-input').addEventListener('change', (e) => {
     let r;
     try { r = C.parseBackup(text); }
     catch (err) { r = { ok: false, errors: [String(err && err.message || err)] }; }
-    if (!r.ok) { failed(`This file isn’t a valid job backup (${r.errors[0]}). Nothing has changed.`); return; }
+    if (!r.ok) {
+      let newer = false;
+      try { const data = JSON.parse(text); newer = !!data && typeof data === 'object' && data.schemaVersion !== 1 && data.schemaVersion !== 2; } catch { newer = false; }
+      failed(newer ? 'This backup was made by a newer version of this app. Nothing has changed.' : `This file isn’t a valid job backup (${r.errors[0]}). Nothing has changed.`);
+      return;
+    }
     const s = C.summariseBackup(r.job);
     // Importing never replaces anything: the backup becomes a new job.
     modal('Import backup', [
@@ -2590,7 +3001,7 @@ function explainWideTouch(width) {
 // Drop whatever is in progress without saving any part of it.
 function cancelInteraction() {
   const drag = dragFitting;
-  pinch = null; drawingStroke = null; panning = null; dragFitting = null; owner = null;
+  pinch = null; drawingStroke = null; panning = null; dragFitting = null; owner = null; zoneGesture = null; zoneEdgeDrag = null;
   multiPending = null; // a cancelled or pinched tap never toggles
   if (drag) { job = C.normaliseJob(JSON.parse(drag.pre)); renderAll(); }
   else renderCanvas();
@@ -2753,6 +3164,12 @@ $('#canvas').addEventListener('pointerdown', (e) => {
   const hitFitting = hits.length ? hits[0] : null;
   if (fingerOnly && (mode !== 'select' || hitFitting)) explainFingerPan();
 
+  if (mode === 'build' && !fingerOnly && view === 'PLAN' && zoneTool) {
+    zoneGesture = { id: e.pointerId, sx: e.clientX, sy: e.clientY, p };
+    owner = e.pointerId;
+    noteInput(e, 'zone');
+    return;
+  }
   if (mode === 'select' && !fingerOnly) {
     if (multiIds) {
       // Multi mode: a tap toggles a fitting; empty space only pans and never
@@ -2781,12 +3198,29 @@ $('#canvas').addEventListener('pointerdown', (e) => {
         cands: res.cands,
       };
     } else {
-      selectedId = null;
-      panning = { sx: e.clientX, sy: e.clientY, tx: zoom.tx, ty: zoom.ty };
+      const handle = e.target.closest && e.target.closest('.zone-handle');
+      const edge = handle && zoneId ? handle.getAttribute('data-edge') : null;
+      if (edge) {
+        const z = F.zoneById(job, zoneId);
+        zoneEdgeDrag = z ? {
+          id: e.pointerId, edge, zoneId, sx: e.clientX, sy: e.clientY,
+          origin: { x0: z.x0, y0: z.y0, x1: z.x1, y1: z.y1, name: z.name },
+          live: null,
+        } : null;
+        owner = e.pointerId;
+        noteInput(e, 'zone-edge');
+        return;
+      }
+      // Zone scope changes on lift, so a pan that starts on a zone does not select it.
+      const hitZone = F.zoneAtPoint(F.zonesOf(job), p.x, p.y);
+      panning = {
+        sx: e.clientX, sy: e.clientY, tx: zoom.tx, ty: zoom.ty,
+        pendingZone: hitZone || null, pendingClear: !hitZone,
+      };
     }
     owner = e.pointerId;
     noteInput(e, hitFitting ? 'select' : 'pan');
-    renderAll();
+    if (hitFitting) renderAll();
     return;
   }
   if (mode === 'place' && !fingerOnly) { noteInput(e, 'place'); placeAt(p); return; }
@@ -2856,6 +3290,13 @@ function placeAt(p) {
     height = tpl ? tpl.heightMm : (jobPrefs.heights[type] ?? C.TYPES[type].defaultHeightMm ?? 450);
   }
   fromLeft = Math.max(0, fromLeft);
+  if (zoneId && wall !== C.CEILING) {
+    const clip = zoneFaceFor(wall);
+    if (!clip || fromLeft < clip.fromMm || fromLeft > clip.toMm) {
+      toast('Place inside the part of the wall that belongs to this zone.');
+      return;
+    }
+  }
   let clampNote = '';
   if (wall !== C.CEILING) {
     const c = C.clampWallHeight(job, height);
@@ -2947,6 +3388,15 @@ $('#canvas').addEventListener('pointermove', (e) => {
     }
     return;
   }
+  if (zoneEdgeDrag && zoneEdgeDrag.id === e.pointerId) {
+    const drag = zoneEdgeDrag;
+    const moved = Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) >= TAP_SLOP_PX;
+    if (!moved) return;
+    const axis = drag.edge === 'n' || drag.edge === 's' ? p.y : p.x;
+    drag.live = boundsForEdge(drag.origin, drag.edge, axis);
+    renderCanvas();
+    return;
+  }
   if (panning) {
     zoom.tx = panning.tx + (e.clientX - panning.sx);
     zoom.ty = panning.ty + (e.clientY - panning.sy);
@@ -2964,6 +3414,34 @@ function endPointer(e) {
   if (pointers.size < 2) pinch = null;
   if (e.pointerId !== owner) return;
   owner = null;
+  if (zoneGesture && zoneGesture.id === e.pointerId) {
+    const g = zoneGesture;
+    zoneGesture = null;
+    panning = null;
+    if (Math.hypot(e.clientX - g.sx, e.clientY - g.sy) < TAP_SLOP_PX) finishZoneTap(g.p);
+    return;
+  }
+  if (zoneEdgeDrag && zoneEdgeDrag.id === e.pointerId) {
+    const drag = zoneEdgeDrag;
+    zoneEdgeDrag = null;
+    const moved = Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) >= TAP_SLOP_PX;
+    if (!moved || !drag.live) { renderCanvas(); return; }
+    const { W, D } = roomMm();
+    const vertical = drag.edge === 'n' || drag.edge === 's';
+    const rawValue = drag.edge === 'n' ? drag.live.y0 : drag.edge === 's' ? drag.live.y1 : drag.edge === 'w' ? drag.live.x0 : drag.live.x1;
+    const snapped = F.snapToGuides(rawValue, screenMm(12), vertical ? [0, D] : [0, W]);
+    const next = boundsForEdge(drag.origin, drag.edge, snapped);
+    if (next.x0 === drag.origin.x0 && next.y0 === drag.origin.y0 && next.x1 === drag.origin.x1 && next.y1 === drag.origin.y1) {
+      renderCanvas();
+      return;
+    }
+    const before = snapshot();
+    commit(() => {
+      C.replaceZone(job, drag.zoneId, { name: drag.origin.name, x0: next.x0, y0: next.y0, x1: next.x1, y1: next.y1 });
+    }, { exact: true });
+    if (snapshot() === before) renderAll();
+    return;
+  }
   if (multiPending) {
     // A tap only counts if it moved less than TAP_SLOP_PX; longer presses were
     // pans. Two fittings at the same spot ask which one was meant.
@@ -3013,6 +3491,23 @@ function endPointer(e) {
       commit(() => { target.push(stroke); });
     } else renderCanvas();
   }
+  if (panning && (panning.pendingZone || panning.pendingClear)) {
+    const pan = panning;
+    panning = null;
+    if (Math.hypot(e.clientX - pan.sx, e.clientY - pan.sy) < TAP_SLOP_PX) {
+      if (pan.pendingZone) {
+        if (selectedId && !selectionVisible(selectedId, pan.pendingZone)) selectedId = null;
+        zoneId = pan.pendingZone;
+        if (PHONE.matches) inspectorCollapsed = true;
+      } else if (pan.pendingClear) {
+        selectedId = null;
+      }
+      renderAll();
+      return;
+    }
+    renderCanvas();
+    return;
+  }
   panning = null;
 }
 function cancelPointer(e) {
@@ -3050,15 +3545,58 @@ $('#canvas').addEventListener('wheel', (e) => {
 }, { passive: false });
 
 // ---- Modes / palette ------------------------------------------------------------
-const MODES = ['select', 'place', 'draw', 'notes'];
+const MODES = ['select', 'place', 'draw', 'notes', 'build'];
+function screenMm(px) {
+  const svg = $('#canvas');
+  const rect = svg.getBoundingClientRect();
+  const vb = svg.viewBox && svg.viewBox.baseVal;
+  if (!rect.width || !vb || !vb.width || !zoom.s) return 50;
+  return px * (vb.width / rect.width) / zoom.s;
+}
+function snapPlan(p) {
+  const { W, D } = roomMm();
+  const tol = screenMm(12);
+  return { x: F.snapToGuides(p.x, tol, [0, W]), y: F.snapToGuides(p.y, tol, [0, D]) };
+}
+function finishZoneTap(p) {
+  if (!zoneTool || view !== 'PLAN' || !job.floor) return;
+  const snapped = snapPlan(p);
+  if (!zoneTool.first) { zoneTool = { first: snapped }; renderCanvas(); return; }
+  const a = zoneTool.first;
+  const name = 'Zone ' + job.floor.nextZoneNo;
+  let id = null;
+  commit(() => {
+    id = C.addZone(job, {
+      name, x0: Math.min(a.x, snapped.x), y0: Math.min(a.y, snapped.y), x1: Math.max(a.x, snapped.x), y1: Math.max(a.y, snapped.y),
+    });
+    zoneId = id;
+    if (selectedId && !selectionVisible(selectedId, id)) selectedId = null;
+  }, { exact: true });
+  zoneTool = { first: null };
+  if (id && F.zoneById(job, id)) {
+    toast(`Added ${name}. Undo removes it.`);
+    focusZoneName();
+  } else renderCanvas();
+}
+function boundsForEdge(origin, edge, value) {
+  const next = { x0: origin.x0, y0: origin.y0, x1: origin.x1, y1: origin.y1 };
+  if (edge === 'n') next.y0 = Math.round(value);
+  else if (edge === 's') next.y1 = Math.round(value);
+  else if (edge === 'w') next.x0 = Math.round(value);
+  else if (edge === 'e') next.x1 = Math.round(value);
+  return next;
+}
 function setMode(m) {
   if (!MODES.includes(m)) return;
   const leftMulti = m !== 'select' && !!multiIds;
   if (leftMulti) endMulti(); // another tool leaves multi mode with no change
   if (m !== 'place') endCopy(); // so does copy mode
+  if (m !== mode) zoneTool = m === 'build' ? zoneTool : null;
+  if (m !== 'build') zoneTool = null;
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
-  $('#place-palette').hidden = m !== 'place';
+  $('#place-palette').hidden = m !== 'place' && m !== 'build';
+  if (m === 'place' || m === 'build') buildPalette();
   // leaving multi mode swaps the panel back; renderAll so the inspector follows
   if (leftMulti) renderAll(); else renderCanvas();
 }
@@ -3067,6 +3605,22 @@ document.querySelectorAll('.mode-btn[data-mode]').forEach(b => b.addEventListene
 function buildPalette() {
   const pal = $('#place-palette');
   pal.innerHTML = '';
+  if (mode === 'build') {
+    pal.appendChild(el('p', { class: 'palette-title' }, 'Zones'));
+    const add = el('button', { class: 'pal-btn' + (zoneTool ? ' active' : ''), 'data-testid': 'build-add-zone' }, 'Add zone');
+    add.addEventListener('click', () => {
+      view = 'PLAN';
+      zoneTool = { first: null };
+      buildPalette();
+      renderCanvas();
+    });
+    const sizes = el('button', { class: 'pal-btn', 'data-testid': 'build-enter-sizes' }, 'Enter sizes…');
+    sizes.addEventListener('click', openZoneSizeForm);
+    const cancel = el('button', { class: 'pal-btn' }, 'Cancel');
+    cancel.addEventListener('click', () => { zoneTool = null; buildPalette(); renderCanvas(); });
+    pal.append(add, sizes, cancel);
+    return;
+  }
   if (copyTpl) {
     // copy mode: the strip holds what is being copied and a touch-sized Cancel
     const bar = el('div', { class: 'copy-bar', 'data-testid': 'copy-bar', role: 'status' });
@@ -3180,6 +3734,7 @@ document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
   else if ((e.ctrlKey && e.key.toLowerCase() === 'y') || (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'z')) { e.preventDefault(); redo(); }
   else if (e.key === 'Delete' && selectedId) { commit(() => { job.items = job.items.filter(i => i.id !== selectedId); }); toast(`${selectedId} deleted · Undo`); selectedId = null; renderAll(); }
+  else if (e.key === 'Escape' && zoneTool && zoneTool.first) { zoneTool = { first: null }; renderCanvas(); }
   else if (e.key === 'Escape' && copyTpl) cancelCopy(); // leaves copy mode with nothing added
   else if (e.key === 'Escape') {
     if (PHONE.matches) inspectorCollapsed = true;
@@ -3190,6 +3745,7 @@ document.addEventListener('keydown', (e) => {
   else if (e.key.toLowerCase() === 'p') setMode('place');
   else if (e.key.toLowerCase() === 'd') setMode('draw');
   else if (e.key.toLowerCase() === 'n') setMode('notes');
+  else if (e.key.toLowerCase() === 'b') setMode('build');
 });
 
 // ---- Start buttons -----------------------------------------------------------------
@@ -3257,7 +3813,17 @@ async function bootJobs() {
   const sha256 = lockSupport
     ? async (s) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)))].map(b => b.toString(16).padStart(2, '0')).join('')
     : null;
+  if (buildMixed) {
+    jobsApi = J.createJobs({ storage, locks: null, sha256: null, readOnly: true });
+    showStart();
+    const msg = 'This page loaded parts of two app versions. Reload to finish updating. Nothing has been saved.';
+    const card = document.querySelector('#start .start-card');
+    if (card && !card.querySelector('[data-testid="mixed-build"]')) card.prepend(el('p', { class: 'banner', 'data-testid': 'mixed-build' }, msg));
+    toast(msg, 8000);
+    return;
+  }
   jobsApi = J.createJobs({ storage, locks: lockSupport ? navigator.locks : null, sha256, lockDelayMs: TEST_HOOKS.lockDelayMs || 0 });
+  if (jobsApi.peekNewer()) toast('Jobs saved by a newer version of this app are on this device. This version can’t open them and won’t change them.', 8000);
   let legacy = jobsApi.peekLegacy();
   let legacyJobId = null;
   let notice = '';
@@ -3266,7 +3832,8 @@ async function bootJobs() {
     let m = await jobsApi.reconcileLegacy({ writerTab });
     if (!m.ok && m.reason === 'legacy-changed') m = await jobsApi.reconcileLegacy({ writerTab });
     if (m.legacy) legacy = m.legacy;
-    if (m.ok && m.status === 'offer') legacyOffer = { job: legacy.job };
+    if (m.ok && m.status === 'rejected') toast(m.detail || 'This backup has floor data under an older version number, so it can’t be trusted.', 6000);
+    else if (m.ok && m.status === 'offer') legacyOffer = { job: legacy.job };
     else if (m.ok && m.markerUnreadable) {
       legacyMarkerUnreadable = true;
       markerNote = 'The older-version job wasn’t added again: its upgrade record can’t be read. Both are kept as they are; download it from Menu → Recover saved data.';
@@ -3276,6 +3843,15 @@ async function bootJobs() {
       notice = m.reason === 'cap'
         ? `The job list is full (${J.MAX_JOBS} jobs), so the older-version job “${legacy.job.name}” wasn’t added to it. Download a backup of it.`
         : 'The older-version job couldn’t be added to your job list. Download a backup of it.';
+    }
+    const copy = await jobsApi.reconcileV1({ writerTab });
+    if (copy && Array.isArray(copy.offers) && copy.offers.length) v1Offers = copy.offers.slice();
+    if (copy && copy.ok === false && copy.reason === 'lock-timeout') {
+      toast('An older version of this app is busy in another tab. Older jobs will be copied next time.', 6000);
+    } else if (copy && copy.ok === false && copy.reason === 'cap') {
+      toast(`The job list is full (${J.MAX_JOBS} jobs), so ${copy.remaining == null ? 'some' : copy.remaining} older jobs weren’t copied. Open Jobs to remove one, or download them.`, 7000);
+    } else if (copy && copy.ok === false && copy.reason === 'quota') {
+      toast(`Only ${copy.copied} older jobs could be copied because this device’s storage is full. The rest are still saved in the older format. Download all jobs to keep a copy.`, 7000);
     }
   }
   const s = jobsApi.safeScan();
@@ -3288,13 +3864,25 @@ async function bootJobs() {
   const last = jobsApi.readState();
   let opened = false;
   let noticeHidden = false; // the older-version notice wasn't shown by what opened
+  const screenLegacy = () => {
+    const up = asSchema2(legacy.job);
+    return up.ok ? up.job : null;
+  };
   if (readable(last)) { opened = await openRecord(last, notice || markerNote); noticeHidden = !!notice; }
-  else if (notice) { openInMemory(legacy.job, 'unsaved', true, notice); opened = true; }
+  else if (notice) {
+    const shown = screenLegacy();
+    if (shown) { openInMemory(shown, 'unsaved', true, notice); opened = true; }
+  }
   else if (readable(legacyJobId)) opened = await openRecord(legacyJobId);
-  else if (!lockSupport && legacy.status === 'ok') { openInMemory(legacy.job, 'fallback', true); opened = true; }
+  else if (!lockSupport && legacy.status === 'ok') {
+    const shown = screenLegacy();
+    if (shown) { openInMemory(shown, 'fallback', true); opened = true; }
+  }
   if (!opened) { showStart(); if (s.jobs.length || legacyOffer) openJobsList(); if (markerNote) toast(markerNote); }
   // the kept older-version job alone doesn't force Recover open at every boot
-  if (recoveryAll().some(r => r.kind !== 'legacy-kept')) openRecovery();
+  const needsRecovery = recoveryAll().some(r => r.kind !== 'legacy-kept');
+  if (needsRecovery) openRecovery();
+  else if (v1Offers.length) showNextV1Offer();
   else if (legacyOffer) showLegacyOffer();
   else if (noticeHidden) showLegacyNotice(legacy.job, notice);
 }

@@ -4,6 +4,7 @@
 
 export const SCHEMA = 'surface-job';
 export const SCHEMA_VERSION = 1;
+export const BUILD = 'surface-proto-v13-floor-zones-20261012';
 
 export const LIMITS = {
   maxWallM: 20,        // room width / depth
@@ -95,7 +96,7 @@ export function addZone(job, spec) {
   const n = floor && floor.nextZoneNo;
   const zone = {
     id: 'Z' + n,
-    name: spec && spec.name,
+    name: spec && typeof spec.name === 'string' ? spec.name.trim() : spec && spec.name,
     x0: spec && spec.x0,
     y0: spec && spec.y0,
     x1: spec && spec.x1,
@@ -110,6 +111,49 @@ export function addZone(job, spec) {
   job.floor.zones.push({ id: zone.id, name: zone.name, x0: zone.x0, y0: zone.y0, x1: zone.x1, y1: zone.y1 });
   job.floor.nextZoneNo = n + 1;
   return zone.id;
+}
+
+// Replaces one zone's name and bounds. A refusal throws and leaves job untouched.
+export function replaceZone(job, id, spec) {
+  const trial = cloneData(job);
+  if (!trial || !trial.floor || !Array.isArray(trial.floor.zones)) throw new Error('This job has no floor.');
+  const z = trial.floor.zones.find(item => item.id === id);
+  if (!z) throw new Error('That zone is not on this floor.');
+  z.name = spec && typeof spec.name === 'string' ? spec.name.trim() : z.name;
+  z.x0 = spec.x0;
+  z.y0 = spec.y0;
+  z.x1 = spec.x1;
+  z.y1 = spec.y1;
+  const v = validateJobV2(trial);
+  if (!v.ok) throw new Error(v.errors[0]);
+  const live = job.floor.zones.find(item => item.id === id);
+  live.name = z.name;
+  live.x0 = z.x0;
+  live.y0 = z.y0;
+  live.x1 = z.x1;
+  live.y1 = z.y1;
+  return id;
+}
+
+// Removes one zone. The zone counter stays where it is, so the ID is not reused.
+export function removeZone(job, id) {
+  const trial = cloneData(job);
+  if (!trial || !trial.floor || !Array.isArray(trial.floor.zones)) throw new Error('This job has no floor.');
+  const next = trial.floor.zones.filter(item => item.id !== id);
+  if (next.length === trial.floor.zones.length) throw new Error('That zone is not on this floor.');
+  trial.floor.zones = next;
+  const v = validateJobV2(trial);
+  if (!v.ok) throw new Error(v.errors[0]);
+  job.floor.zones = job.floor.zones.filter(item => item.id !== id);
+}
+
+// Undo and redo keep the higher counter, same rule as fitting IDs.
+export function monotonicFloorCounters(restored, current) {
+  if (!restored || !restored.floor || !current || !current.floor) return restored;
+  restored.floor.nextWallNo = Math.max(restored.floor.nextWallNo, current.floor.nextWallNo);
+  restored.floor.nextZoneNo = Math.max(restored.floor.nextZoneNo, current.floor.nextZoneNo);
+  restored.floor.nextRouteNo = Math.max(restored.floor.nextRouteNo, current.floor.nextRouteNo);
+  return restored;
 }
 
 function cloneData(job) {
@@ -526,10 +570,10 @@ function zoneProblem(z, i, widthMm, depthMm, room, others, nextZoneNo, seen) {
       return `Zones can't overlap. This one would cover ${(w / 1000).toFixed(2)} × ${(d / 1000).toFixed(2)} m of ${o.name}.`;
     }
   }
-  if (typeof z.name !== 'string' || z.name.length < 1 || z.name.length > MAX_ZONE_NAME) {
+  if (typeof z.name !== 'string' || z.name.trim().length < 1 || z.name.length > MAX_ZONE_NAME) {
     return 'A zone name must be 1 to 60 characters.';
   }
-  const clash = others.find(o => typeof o.name === 'string' && o.name.toLowerCase() === z.name.toLowerCase());
+  const clash = others.find(o => typeof o.name === 'string' && o.name.trim().toLowerCase() === z.name.trim().toLowerCase());
   if (clash) return `Another zone is already called ${clash.name}.`;
   return null;
 }
