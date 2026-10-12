@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Design preview · sample barbershop · floor, zones and containment</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <span class="preview-label" data-testid="preview-label">Design preview · sample barbershop</span>
+    <span class="topbar-note">Invented shop. Nothing is saved and nothing is linked to quotes.</span>
+    <span class="spacer"></span>
+    <button type="button" id="btn-print" data-testid="open-print" aria-haspopup="dialog">Print preview</button>
+    <button type="button" id="btn-panel" data-testid="toggle-panel" aria-controls="panel" aria-expanded="true">Hide panel</button>
+  </header>
+
+  <div id="main">
+    <div id="centre">
+      <div id="viewbar">
+        <div class="seg" role="group" aria-label="View">
+          <button type="button" data-view="floor" data-testid="view-floor" aria-pressed="true">Whole floor</button>
+          <button type="button" data-view="wall" data-testid="view-wall" aria-pressed="false">Wall view</button>
+        </div>
+        <label class="zone-pick">Zone
+          <select id="zone-select" data-testid="zone-select"></select>
+        </label>
+        <div id="wall-tabs" role="group" aria-label="Walls in this zone" data-testid="wall-tabs"></div>
+      </div>
+
+      <div id="canvas-wrap">
+        <div class="caption">
+          <h1 id="view-title" data-testid="view-title"></h1>
+          <p id="hint" role="status" data-testid="hint"></p>
+        </div>
+        <svg id="drawing" data-testid="drawing" role="img" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg"></svg>
+        <details id="legend-float" class="legend">
+          <summary>Legend</summary>
+          <div class="legend-body"></div>
+        </details>
+      </div>
+    </div>
+
+    <aside id="panel" data-testid="panel" aria-label="Zone, containment and wall details">
+      <div class="panel-head">
+        <span class="panel-title">Details</span>
+        <button type="button" id="btn-panel-close" data-testid="close-panel">Close</button>
+      </div>
+
+      <section id="zone-info" aria-live="polite"></section>
+      <details class="explain">
+        <summary>Zone, room and electrical layer</summary>
+        <p>A <b>room</b> is a space closed in by walls. A <b>zone</b> is a part of the floor you choose to work on and print as one set of sheets. A zone can be a whole room, part of a room or several rooms. Waiting and till and Cutting floor share one room here, so there is no wall between them.</p>
+        <p>An <b>electrical layer</b> is a filter for kinds of work, such as lighting or sockets. Layers hide or show fittings across every zone. Zones decide which part of the floor and which walls you see.</p>
+      </details>
+
+      <section aria-labelledby="containment-h">
+        <h2 id="containment-h">Containment</h2>
+        <p class="proposed">Proposed. Routes sit at sample positions. Sizes, fixings, bends and boxes are not set.</p>
+        <label class="check"><input type="checkbox" id="show-trunking" data-testid="show-trunking" checked> Show trunking <span id="count-trunking"></span></label>
+        <label class="check"><input type="checkbox" id="show-conduit" data-testid="show-conduit" checked> Show conduit <span id="count-conduit"></span></label>
+        <ul id="route-list" class="route-list"></ul>
+        <div id="route-detail" class="route-detail" data-testid="route-detail"></div>
+      </section>
+
+      <section aria-labelledby="addwall-h">
+        <h2 id="addwall-h">Add a wall <span class="tag">sample interaction</span></h2>
+        <p class="proposed">Straight walls only, snapped to 250 mm, up to 3. Added walls last until you reload.</p>
+        <button type="button" id="btn-draw-wall" data-testid="draw-wall">Draw a wall on the plan</button>
+        <button type="button" id="btn-sample-wall" data-testid="add-sample-wall">Add sample wall: 1.5 m partition between waiting and cutting floor</button>
+        <p id="added-walls" class="field-note" data-testid="added-walls"></p>
+        <button type="button" id="btn-remove-walls" data-testid="remove-added-walls">Remove added walls</button>
+      </section>
+
+      <section aria-labelledby="legend-h">
+        <h2 id="legend-h">Legend</h2>
+        <div class="legend-body" id="legend-panel"></div>
+      </section>
+    </aside>
+  </div>
+</div>
+
+<div id="print-root" data-testid="print-dialog" role="dialog" aria-modal="true" aria-labelledby="print-heading" hidden>
+  <div class="print-toolbar">
+    <h2 id="print-heading">Print preview</h2>
+    <fieldset class="print-zones">
+      <legend>Wall sheets for</legend>
+      <span id="print-zone-boxes"></span>
+    </fieldset>
+    <span id="print-count" class="print-count"></span>
+    <button type="button" id="btn-do-print" data-testid="do-print">Print</button>
+    <button type="button" id="btn-close-print" data-testid="close-print">Close</button>
+  </div>
+  <div id="sheets"></div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
