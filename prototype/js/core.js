@@ -73,6 +73,50 @@ export function blankJob(name = 'Untitled room') {
   };
 }
 
+// Schema 2 job: same record as blankJob, plus an empty floor. Counters only move forward.
+export function blankJobV2(name = 'Untitled room') {
+  const job = blankJob(name);
+  job.schemaVersion = 2;
+  job.floor = {
+    walls: [],
+    zones: [],
+    routes: [],
+    nextWallNo: 1,
+    nextZoneNo: 1,
+    nextRouteNo: 1,
+  };
+  return job;
+}
+
+// Adds one named rectangle. Validates a copy first, so a refusal throws and leaves job untouched.
+export function addZone(job, spec) {
+  const trial = cloneData(job);
+  const floor = trial && trial.floor;
+  const n = floor && floor.nextZoneNo;
+  const zone = {
+    id: 'Z' + n,
+    name: spec && spec.name,
+    x0: spec && spec.x0,
+    y0: spec && spec.y0,
+    x1: spec && spec.x1,
+    y1: spec && spec.y1,
+  };
+  if (floor && Array.isArray(floor.zones) && Number.isInteger(n)) {
+    floor.zones.push(zone);
+    floor.nextZoneNo = n + 1;
+  }
+  const v = validateJobV2(trial);
+  if (!v.ok) throw new Error(v.errors[0]);
+  job.floor.zones.push({ id: zone.id, name: zone.name, x0: zone.x0, y0: zone.y0, x1: zone.x1, y1: zone.y1 });
+  job.floor.nextZoneNo = n + 1;
+  return zone.id;
+}
+
+function cloneData(job) {
+  try { return JSON.parse(JSON.stringify(job)); }
+  catch { return null; }
+}
+
 export function makeId(job) {
   return 'F' + job.nextId;
 }
@@ -422,10 +466,91 @@ export function validateJob(job) {
   return { ok: true, job };
 }
 
+const MAX_ZONES = 30;
+const MIN_ZONE_MM = 100;
+const MAX_ZONE_NAME = 60;
+const FLOOR_KEYS = ['walls', 'zones', 'routes', 'nextWallNo', 'nextZoneNo', 'nextRouteNo'];
+const ZONE_KEYS = ['id', 'name', 'x0', 'y0', 'x1', 'y1'];
+
+function floorErrors(job) {
+  const floor = job.floor;
+  if (!floor || typeof floor !== 'object' || Array.isArray(floor)) return ['floor: missing or invalid'];
+  for (const k of Object.keys(floor)) {
+    if (!FLOOR_KEYS.includes(k)) return ['floor: unsupported field'];
+  }
+  if (!Array.isArray(floor.walls)) return ['floor.walls: not an array'];
+  if (floor.walls.length > 0) return ['floor.walls: not accepted yet'];
+  if (!Array.isArray(floor.routes)) return ['floor.routes: not an array'];
+  if (floor.routes.length > 0) return ['floor.routes: not accepted yet'];
+  if (!Array.isArray(floor.zones)) return ['floor.zones: not an array'];
+  if (!Number.isInteger(floor.nextWallNo) || floor.nextWallNo < 1) return ['floor.nextWallNo: invalid'];
+  if (!Number.isInteger(floor.nextZoneNo) || floor.nextZoneNo < 1) return ['floor.nextZoneNo: invalid'];
+  if (!Number.isInteger(floor.nextRouteNo) || floor.nextRouteNo < 1) return ['floor.nextRouteNo: invalid'];
+  if (floor.zones.length > MAX_ZONES) return ['This floor already has 30 zones, which is the most it can hold.'];
+
+  const widthMm = wallLengthMm(job.room, 'A');
+  const depthMm = wallLengthMm(job.room, 'B');
+  const seen = new Set();
+  const accepted = [];
+  for (let i = 0; i < floor.zones.length; i++) {
+    const err = zoneProblem(floor.zones[i], i, widthMm, depthMm, job.room, accepted, floor.nextZoneNo, seen);
+    if (err) return [err];
+    accepted.push(floor.zones[i]);
+    seen.add(floor.zones[i].id);
+  }
+  return [];
+}
+
+function zoneProblem(z, i, widthMm, depthMm, room, others, nextZoneNo, seen) {
+  const at = `floor.zones[${i}]`;
+  if (!z || typeof z !== 'object' || Array.isArray(z)) return `${at}: not an object`;
+  for (const k of Object.keys(z)) {
+    if (!ZONE_KEYS.includes(k)) return `${at}: unsupported field`;
+  }
+  if (typeof z.id !== 'string' || !/^Z\d+$/.test(z.id)) return `${at}.id: bad format`;
+  const n = Number(z.id.slice(1));
+  if (!Number.isInteger(n) || n < 1 || z.id !== 'Z' + n) return `${at}.id: bad format`;
+  if (seen.has(z.id)) return `duplicate id ${z.id}`;
+  if (n >= nextZoneNo) return `${at}.id: exceeds nextZoneNo`;
+  if (![z.x0, z.y0, z.x1, z.y1].every(Number.isInteger)) return 'A zone must use whole millimetres.';
+  if (z.x1 - z.x0 < MIN_ZONE_MM || z.y1 - z.y0 < MIN_ZONE_MM) {
+    return 'A zone must be at least 100 mm wide and deep.';
+  }
+  if (z.x0 < 0 || z.y0 < 0 || z.x1 > widthMm || z.y1 > depthMm) {
+    return `Keep the zone inside the floor, which is ${room.widthM.toFixed(2)} × ${room.depthM.toFixed(2)} m.`;
+  }
+  for (const o of others) {
+    if (z.x0 < o.x1 && o.x0 < z.x1 && z.y0 < o.y1 && o.y0 < z.y1) {
+      const w = Math.min(z.x1, o.x1) - Math.max(z.x0, o.x0);
+      const d = Math.min(z.y1, o.y1) - Math.max(z.y0, o.y0);
+      return `Zones can't overlap. This one would cover ${(w / 1000).toFixed(2)} × ${(d / 1000).toFixed(2)} m of ${o.name}.`;
+    }
+  }
+  if (typeof z.name !== 'string' || z.name.length < 1 || z.name.length > MAX_ZONE_NAME) {
+    return 'A zone name must be 1 to 60 characters.';
+  }
+  const clash = others.find(o => typeof o.name === 'string' && o.name.toLowerCase() === z.name.toLowerCase());
+  if (clash) return `Another zone is already called ${clash.name}.`;
+  return null;
+}
+
+// Schema 2 only. Version 1 stays on validateJob, which still rejects every other version.
+export function validateJobV2(job) {
+  if (!job || typeof job !== 'object' || Array.isArray(job)) return { ok: false, errors: ['not an object'] };
+  if (job.schemaVersion !== 2) return { ok: false, errors: ['schemaVersion: expected 2'] };
+  const base = validateJob({ ...job, schemaVersion: SCHEMA_VERSION });
+  if (!base.ok) return base;
+  const errors = floorErrors(job);
+  if (errors.length) return { ok: false, errors };
+  return { ok: true, job };
+}
+
 export function serialiseJob(job) {
-  // Persistence must agree with import validation: refuse to save a job that
-  // validateJob would reject. Callers catch and surface an honest error.
-  const v = validateJob(job);
+  // Persistence must agree with import validation. Schema 2 uses its own
+  // validator; every other record still goes through validateJob.
+  const v = job && typeof job === 'object' && !Array.isArray(job) && job.schemaVersion === 2
+    ? validateJobV2(job)
+    : validateJob(job);
   if (!v.ok) throw new Error('job failed validation: ' + v.errors[0]);
   return JSON.stringify({ ...job, savedAt: new Date().toISOString() });
 }
@@ -451,12 +576,37 @@ export function normaliseJob(job) {
   return out;
 }
 
+// Copies a floor that already validated. Missing or malformed floor data is left
+// alone, never replaced with an empty floor.
+export function normaliseJobV2(job) {
+  const out = normaliseJob(job);
+  const f = job && job.floor;
+  if (!f || typeof f !== 'object' || Array.isArray(f)) return out;
+  if (!Array.isArray(f.walls) || !Array.isArray(f.zones) || !Array.isArray(f.routes)) return out;
+  out.floor = {
+    walls: f.walls.map(w => ({ ...w })),
+    zones: f.zones.map(z => ({ id: z.id, name: z.name, x0: z.x0, y0: z.y0, x1: z.x1, y1: z.y1 })),
+    routes: f.routes.map(r => ({ ...r })),
+    nextWallNo: f.nextWallNo,
+    nextZoneNo: f.nextZoneNo,
+    nextRouteNo: f.nextRouteNo,
+  };
+  return out;
+}
+
 export function parseBackup(text) {
   // Untrusted input. Returns validateJob-style result; never throws.
+  // Only schemaVersion 2 takes the floor path. Other versions, including
+  // unknown ones, stay on validateJob and are rejected there.
   let data;
   try { data = JSON.parse(text); } catch { return { ok: false, errors: ['not valid JSON'] }; }
   if (Array.isArray(data) || data === null || typeof data !== 'object') {
     return { ok: false, errors: ['not a job object'] };
+  }
+  if (data.schemaVersion === 2) {
+    const v2 = validateJobV2(data);
+    if (!v2.ok) return v2;
+    return { ok: true, job: normaliseJobV2(v2.job) };
   }
   const v = validateJob(data);
   if (!v.ok) return v;
