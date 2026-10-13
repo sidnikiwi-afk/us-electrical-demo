@@ -35,6 +35,8 @@ button:disabled { opacity: .4; cursor: default; }
 .pal-btn { width: 100px; flex: 0 0 auto; display: flex; flex-direction: column; gap: 3px; align-items: center; padding: 6px; font-size: 13px; min-height: 64px; }
 .pal-btn .sym { font-size: 18px; font-weight: 700; }
 .pal-btn.active { background: #dce7ff; border-color: #23324d; }
+#canvas .route-label { font-weight: 700; }
+.containment-warning { margin: 8px 0; }
 /* "Place like this": the strip says what is being copied and keeps Cancel touch sized */
 .copy-bar { display: flex; align-items: center; gap: 12px; font-size: 15px; padding: 4px; }
 .copy-cancel-btn { flex: 0 0 auto; min-height: 44px; min-width: 88px; }
@@ -215,7 +217,8 @@ button.q-chip { border: 0; font: inherit; color: inherit; cursor: pointer; }
    The drawing takes the space. Details and the breakdown open on demand,
    and every control stays in the page flow so nothing sits on top of it. */
 @media (max-width: 600px), (max-height: 500px) {
-  #app { overflow: hidden; }
+  /* clip, not hidden: a hidden box can still be scrolled by focus or scrollIntoView, which slid the drawing sideways */
+  #app { overflow: hidden; overflow: clip; }
   #topbar { min-height: 0; gap: 6px; row-gap: 2px; padding: 2px 8px; }
   #topbar button { min-height: 44px; min-width: 44px; padding: 0 8px; }
   #topbar .spacer, #topbar .btn-text { display: none; }
@@ -444,8 +447,17 @@ button.q-chip { border: 0; font: inherit; color: inherit; cursor: pointer; }
 @media (max-width: 600px), (max-height: 500px) {
   #view-tabs { display: flex; flex-direction: column; align-items: stretch; }
   #view-tabs .zone-select { width: 100%; max-width: none; }
-  #view-tabs .face-row { display: flex; gap: 4px; overflow-x: auto; }
+  #view-tabs .face-row { display: flex; gap: 4px; overflow-x: auto; min-width: 0; max-width: 100%; }
   #view-tabs .face-row button { flex: 1 1 0; min-width: 0; min-height: 44px; }
   #view-tabs .face-row.faces-scroll { flex-wrap: nowrap; }
   #view-tabs .face-row.faces-scroll button { flex: 0 0 auto; min-width: 5.5rem; }
+}
+
+/* Phone portrait: the open Layers panel stops inside the drawing and scrolls,
+   so the Containment rows stay reachable. #app clips, so nothing below the
+   drawing can be scrolled to. 64px and 116px match the one-row and two-row
+   control offsets used above. */
+@media (max-width: 600px) and (min-height: 501px) {
+  #canvas-wrap #layers-panel { max-height: calc(100cqh - 64px); }
+  #canvas-wrap:has(#btn-layers-reset:not([hidden])) #layers-panel { max-height: calc(100cqh - 116px); }
 }

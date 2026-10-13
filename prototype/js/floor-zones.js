@@ -3,6 +3,7 @@
 // Interior face offsets use the same viewed-from-left rule as floor-walls.js.
 
 import { facesFor, isWallId, wallAxis, wallLength } from './floor-walls.js';
+import { routeLabel } from './floor-routes.js';
 
 export function zonesOf(job) {
   const list = job && job.floor && Array.isArray(job.floor.zones) ? job.floor.zones : [];
@@ -231,16 +232,34 @@ function wallOutside(wall, widthMm, depthMm) {
   return false;
 }
 
-// Names walls and zones that would fall outside a smaller floor. Null when the size is fine.
-export function outsideFloorMessage(job, widthM, depthM) {
+function exteriorSpan(id, widthMm, depthMm) {
+  if (id === 'A' || id === 'C') return widthMm;
+  if (id === 'B' || id === 'D') return depthMm;
+  return null;
+}
+
+// Names walls, zones and runs that would fall outside a smaller floor. Null when the size is fine.
+export function outsideFloorMessage(job, widthM, depthM, heightM) {
   const W = Math.round(Number(widthM) * 1000);
   const D = Math.round(Number(depthM) * 1000);
   const names = [];
+  const outsideWalls = new Set();
   for (const wall of wallsOf(job)) {
-    if (wallOutside(wall, W, D)) names.push(wall.id);
+    if (wallOutside(wall, W, D)) {
+      names.push(wall.id);
+      outsideWalls.add(wall.id);
+    }
   }
   for (const z of zonesOf(job)) {
     if (z.x0 < 0 || z.y0 < 0 || z.x1 > W || z.y1 > D) names.push(`zone ${z.name}`);
+  }
+  const ceiling = heightM === undefined || heightM === null ? null : Math.round(Number(heightM) * 1000);
+  for (const route of (job && job.floor && job.floor.routes) || []) {
+    if (!route || outsideWalls.has(route.wall)) continue;
+    const span = exteriorSpan(route.wall, W, D);
+    const pastEnd = span !== null && (route.startMm < 0 || route.endMm > span || route.endMm - route.startMm < 50);
+    const pastHeight = ceiling !== null && Number.isInteger(route.heightMm) && route.heightMm > ceiling;
+    if (pastEnd || pastHeight) names.push(`route ${routeLabel(route)}`);
   }
   if (!names.length) return null;
   return `The floor can’t be that small yet. ${listNames(names)} would be outside it. Move or remove them first.`;

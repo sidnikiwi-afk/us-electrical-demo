@@ -1,0 +1,32 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import * as C from '../prototype/js/core.js';
+import * as J from '../prototype/js/jobs-v2.js';
+import { fakeStorage, fakeLocks, sha256, randomHex } from './ep21-fakes.js';
+
+test('saved containment keeps face positions, prices and original records through edits and exports', async () => {
+ const job=C.blankJobV2('Synthetic containment');job.room={widthM:9,depthM:6,heightM:2.7};
+ const wall=C.addWall(job,{x1:2500,y1:3000,x2:6000,y2:3000});
+ const beforePrice=JSON.stringify(C.breakdown(job));
+ const id=C.addRoute(job,{type:'trunking',wall,face:'N',startMm:1000,endMm:2500,heightMm:1200,notes:'Synthetic run'});
+ assert.equal(id,'R1');
+ assert.deepEqual(job.floor.routes[0],{id:'R1',type:'trunking',wall:'W1',face:'N',startMm:1000,endMm:2500,heightMm:1200,notes:'Synthetic run'});
+ assert.deepEqual(C.faceOffsetToPlan(job,wall,'N',job.floor.routes[0].startMm),{x:5000,y:3000});
+ C.replaceWall(job,wall,{x1:2500,y1:3000,x2:6500,y2:3000});
+ assert.equal(job.floor.routes[0].startMm,1500);assert.equal(job.floor.routes[0].endMm,3000);
+ assert.deepEqual(C.faceOffsetToPlan(job,wall,'N',1500),{x:5000,y:3000});
+ const before=JSON.stringify(job);
+ assert.throws(()=>C.replaceWall(job,wall,{x1:2500,y1:3000,x2:3200,y2:3000}));
+ assert.throws(()=>C.removeWall(job,wall));assert.equal(JSON.stringify(job),before);
+ C.replaceRoute(job,id,{type:'conduit',wall,face:'N',startMm:1500,endMm:3000,heightMm:1200,notes:'Synthetic run'});
+ assert.equal(job.floor.routes[0].id,id);assert.equal(job.floor.routes[0].type,'conduit');
+ assert.equal(JSON.stringify(C.breakdown(job)),beforePrice);
+ assert.equal(C.validateJobV2(job).ok,true);
+ const storage=fakeStorage();const api=J.createJobsV2({storage,locks:fakeLocks(),sha256,randomHex});
+ const saved=await api.create({job});assert.equal(saved.ok,true);
+ const reopened=api.readJob(saved.jobId);assert.equal(reopened.ok,true);assert.deepEqual(reopened.env.job.floor.routes,job.floor.routes);
+ const archive=J.buildArchive(api.safeScan(),'2026-10-13T00:00:00Z');assert.equal(J.validateArchive(archive.text).ok,true);
+ C.removeRoute(job,id);assert.equal(job.floor.routes.length,0);assert.equal(job.floor.nextRouteNo,2);
+ assert.equal(C.addRoute(job,{type:'trunking',wall:'A',face:'S',startMm:0,endMm:50,heightMm:0,notes:''}),'R2');
+ assert.equal(C.validateJobV2(job).ok,true);
+});

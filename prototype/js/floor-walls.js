@@ -1,6 +1,6 @@
 // Interior wall geometry. Plan millimetres, x right, y down.
 // Offsets are viewed-from-left: S=x-x1, N=x2-x, W=y-y1, E=y2-y.
-// No zones, routes, or pricing here.
+// Route records live in floor-routes.js and use these same offsets.
 
 export const MAX_WALLS = 50;
 export const MIN_WALL_MM = 100;
@@ -223,5 +223,6 @@ export function attachmentProblem(wall, face, offset, kind) {
   if (!bad) return null;
   if (kind === 'note') return MSG.strandNote;
   if (kind === 'sketch') return MSG.strandSketch;
+  if (kind === 'route') return 'This change would leave a route off the wall.';
   return MSG.strandFitting;
 }

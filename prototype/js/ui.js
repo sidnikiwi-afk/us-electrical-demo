@@ -5,8 +5,10 @@ import * as J from './jobs-v2.js';
 import * as V1 from './jobs.js';
 import * as F from './floor-zones.js';
 import * as Walls from './floor-walls.js';
+import * as Routes from './floor-routes.js';
 
-const BUILD = 'surface-proto-v14-floor-walls-20261013';
+const BUILD = 'surface-proto-v15-floor-routes-20261013';
+const CONTAINMENT_WARNING = "Containment isn't priced or measured in this version.";
 const buildMixed = BUILD !== C.BUILD || BUILD !== J.BUILD;
 
 const NS = 'http://www.w3.org/2000/svg';
@@ -54,11 +56,18 @@ let zoneEdgeDrag = null;        // one edge handle; the job changes on lift only
 let wallTool = null;            // { first: {x,y}|null, hover } while Add wall is waiting
 let wallGesture = null;         // pointer that started a wall tap; committed on lift
 let wallDrag = null;            // end handle; the job changes on lift only
+let routeTool = null;          // { type, first: {offset,height}|null, hover } on a face
+let routeGesture = null;       // pointer that started a run tap; committed on lift
+let routeDrag = null;          // end handle; the job changes on lift only
+let selectedRoute = null;      // 'R1' while a run is inspected
+let showContainment = { trunking: true, conduit: true }; // view state, never saved
 let selectedWall = null;        // 'A'..'D' or 'W1' while a wall is inspected
+let paletteView = null;
 let highlightIds = null;        // fittings shown after "Show them"
 let zoneNotesOpen = false;
 let lastZoneDetails = null;
 let lastWallDetails = null;
+let lastRouteDetails = null;
 // "Set height for several" sub-state of the Select tool: multiIds is null when
 // off and an array of fitting IDs when on. multiDraft keeps the typed height
 // across panel rebuilds; multiPending holds a tap awaiting the 12-px threshold.
@@ -1106,6 +1115,7 @@ function renderPlan(content, { W, D }, show = isShown) {
     svgEl('circle', { cx: zoneTool.first.x, cy: zoneTool.first.y, r: 70, fill: '#23324d' }, content);
   }
   drawInteriorWalls(content);
+  drawPlanRoutes(content);
   if (wallTool && wallTool.first) {
     svgEl('circle', { cx: wallTool.first.x, cy: wallTool.first.y, r: 70, fill: '#23324d' }, content);
     const aim = wallTool.hover ? lockedWall(wallTool.first, snapPlan(wallTool.hover)) : null;
@@ -1259,6 +1269,180 @@ function drawInteriorWalls(content) {
     }
   }
 }
+function exteriorFace(wall) {
+  return { A: 'S', B: 'W', C: 'N', D: 'E' }[wall] || null;
+}
+function routesOf() {
+  return (job && job.floor && Array.isArray(job.floor.routes)) ? job.floor.routes : [];
+}
+function routeById(id) {
+  return routesOf().find(route => route && route.id === id) || null;
+}
+function routesOn(wall, face) {
+  return routesOf().filter(route => route && route.wall === wall && route.face === face && showContainment[route.type]);
+}
+function faceContext() {
+  if (!job || view === 'PLAN') return null;
+  const parsed = Walls.parseFaceView(view);
+  const wallId = parsed ? parsed.id : view;
+  const face = parsed ? parsed.face : exteriorFace(view);
+  if (!face) return null;
+  const wall = Routes.wallGeometry(job, wallId);
+  if (!wall || !Routes.faceAllowed(wall, face)) return null;
+  const clip = zoneId ? (faceForView(view) || null) : null;
+  return { wallId, face, wall, length: Walls.wallLength(wall), clip };
+}
+function scopeClipFor(route) {
+  if (!zoneId || !route) return null;
+  const z = activeZone();
+  if (!z) return null;
+  return F.zoneTouchingFaces(job, z).find(item => item.wall === route.wall && item.face === route.face) || null;
+}
+function routeInScope(route) {
+  if (!route || !showContainment[route.type]) return false;
+  if (view === 'PLAN') {
+    if (!zoneId) return true;
+    const clip = scopeClipFor(route);
+    return !!(clip && route.endMm > clip.fromMm && route.startMm < clip.toMm);
+  }
+  const ctx = faceContext();
+  if (!ctx || route.wall !== ctx.wallId || route.face !== ctx.face) return false;
+  if (!ctx.clip) return true;
+  return route.endMm > ctx.clip.fromMm && route.startMm < ctx.clip.toMm;
+}
+function clipRefusal(route) {
+  const clip = scopeClipFor(route);
+  if (!clip) return null;
+  if (route.startMm < clip.fromMm || route.endMm > clip.toMm) {
+    return 'Keep both ends inside the part of the wall that belongs to this zone.';
+  }
+  return null;
+}
+function dropRoutePoint() {
+  if (routeTool && routeTool.first) routeTool = { type: routeTool.type, first: null, hover: null };
+}
+function liveRoute(route) {
+  if (routeDrag && routeDrag.routeId === route.id && routeDrag.live) {
+    return { ...route, startMm: routeDrag.live.startMm, endMm: routeDrag.live.endMm };
+  }
+  return route;
+}
+function routeSpan(route, clip) {
+  const live = liveRoute(route);
+  if (!clip) return [live.startMm, live.endMm];
+  const from = Math.max(live.startMm, clip.fromMm);
+  const to = Math.min(live.endMm, clip.toMm);
+  if (to <= from) return null;
+  return [from, to];
+}
+function paintRouteBand(parent, route, x1, y1, x2, y2) {
+  const g = svgEl('g', {
+    class: 'route route-' + route.type,
+    'data-route': route.id,
+    'data-testid': `route-${route.id}`,
+  }, parent);
+  const hit = screenMm(44);
+  svgEl('line', {
+    x1, y1, x2, y2, stroke: 'transparent', 'stroke-width': hit,
+    class: 'route-hit', 'data-route': route.id,
+  }, g);
+  if (route.type === 'trunking') {
+    svgEl('line', { x1, y1, x2, y2, stroke: '#7a5200', 'stroke-width': 70, 'pointer-events': 'none' }, g);
+    svgEl('line', { x1, y1, x2, y2, stroke: '#f2b84b', 'stroke-width': 46, 'pointer-events': 'none' }, g);
+  } else {
+    svgEl('line', {
+      x1, y1, x2, y2, stroke: '#1d5fa8', 'stroke-width': 28,
+      'stroke-dasharray': '90 50', 'pointer-events': 'none',
+    }, g);
+  }
+  const label = svgEl('text', {
+    x: (x1 + x2) / 2, y: (y1 + y2) / 2 - 90,
+    'text-anchor': 'middle', 'font-size': 180, 'font-weight': '700',
+    fill: '#1a1a1a', class: 'route-label', 'pointer-events': 'none',
+  }, g);
+  label.textContent = Routes.routeLabel(route);
+  return g;
+}
+function paintRouteHandles(parent, route, at) {
+  if (mode !== 'select' || selectedRoute !== route.id) return;
+  if (!parent.ownerSVGElement || parent.ownerSVGElement.id !== 'canvas') return;
+  const handle = screenMm(44);
+  for (const which of ['start', 'end']) {
+    const p = at(which);
+    if (!p) continue;
+    svgEl('rect', {
+      x: p.x - handle / 2, y: p.y - handle / 2, width: handle, height: handle,
+      fill: 'transparent', stroke: 'none', class: 'route-handle',
+      'data-which': which, 'data-route': route.id, 'data-testid': `route-handle-${which}`,
+    }, parent);
+    svgEl('rect', {
+      x: p.x - 50, y: p.y - 50, width: 100, height: 100,
+      fill: '#fff', stroke: '#23324d', 'stroke-width': 16, 'pointer-events': 'none',
+    }, parent);
+  }
+}
+function drawPlanRoutes(content) {
+  if (!job) return;
+  const nudge = { N: [0, -120], S: [0, 120], E: [120, 0], W: [-120, 0] };
+  for (const src of routesOf()) {
+    if (!showContainment[src.type] || !routeInScope(src)) continue;
+    const wall = Routes.wallGeometry(job, src.wall);
+    if (!wall || !Routes.faceAllowed(wall, src.face)) continue;
+    const route = liveRoute(src);
+    const clip = zoneId ? scopeClipFor(src) : null;
+    const span = routeSpan(route, clip);
+    if (!span) continue;
+    const a = Walls.planFromOffset(wall, src.face, span[0]);
+    const b = Walls.planFromOffset(wall, src.face, span[1]);
+    if (!a || !b) continue;
+    const shift = nudge[src.face] || [0, 0];
+    paintRouteBand(content, src, a.x + shift[0], a.y + shift[1], b.x + shift[0], b.y + shift[1]);
+    const endsInside = (mm) => !clip || (mm >= clip.fromMm && mm <= clip.toMm);
+    paintRouteHandles(content, src, (which) => {
+      const mm = which === 'start' ? route.startMm : route.endMm;
+      if (!endsInside(mm)) return null;
+      const p = Walls.planFromOffset(wall, src.face, mm);
+      if (!p) return null;
+      return { x: p.x + shift[0], y: p.y + shift[1] };
+    });
+  }
+}
+function drawFaceRoutes(content, wallId, face, H, clip) {
+  for (const src of routesOn(wallId, face)) {
+    if (view !== 'PLAN' && !routeInScope(src) && !(clip && src.endMm > clip.fromMm && src.startMm < clip.toMm)) continue;
+    const route = liveRoute(src);
+    const span = routeSpan(route, clip);
+    if (!span) continue;
+    const y = H - route.heightMm;
+    paintRouteBand(content, src, span[0], y, span[1], y);
+    const endsInside = (mm) => !clip || (mm >= clip.fromMm && mm <= clip.toMm);
+    paintRouteHandles(content, src, (which) => {
+      const mm = which === 'start' ? route.startMm : route.endMm;
+      if (!endsInside(mm)) return null;
+      return { x: mm, y };
+    });
+  }
+}
+function paintRoutePreview(content, H, clip) {
+  if (!routeTool || !routeTool.first || view === 'PLAN') return;
+  const y = H - routeTool.first.height;
+  const x0 = routeTool.first.offset;
+  svgEl('circle', { cx: x0, cy: y, r: 70, fill: routeTool.type === 'conduit' ? '#1d5fa8' : '#7a5200' }, content);
+  if (!routeTool.hover) return;
+  const x1 = routeTool.hover.offset;
+  let from = Math.min(x0, x1);
+  let to = Math.max(x0, x1);
+  if (clip) {
+    from = Math.max(from, clip.fromMm);
+    to = Math.min(to, clip.toMm);
+  }
+  if (to <= from) return;
+  svgEl('line', {
+    x1: from, y1: y, x2: to, y2: y,
+    stroke: routeTool.type === 'conduit' ? '#1d5fa8' : '#f2b84b',
+    'stroke-width': 40, 'stroke-dasharray': '80 50', 'pointer-events': 'none',
+  }, content);
+}
 function renderWall(content, wall, { W, D, H }, forPrint = false, show = isShown) {
   const fullL = (wall === 'A' || wall === 'C') ? W : D;
   const face = forPrint ? null : zoneFaceFor(wall);
@@ -1289,11 +1473,13 @@ function renderWall(content, wall, { W, D, H }, forPrint = false, show = isShown
       const c = svgEl('text', { x: x1, y: -80, 'font-size': 180, fill: '#555', 'text-anchor': 'end', 'data-testid': 'wall-continues' }, content);
       c.textContent = 'Wall continues';
     }
-    const outside = job.items.filter(i => i.wall === wall && !F.fittingOnFace(i, face));
-    if (outside.length) {
+    const outsideF = job.items.filter(i => i.wall === wall && i.wall !== C.CEILING && !F.fittingOnFace(i, face)).length;
+    const outsideFace = exteriorFace(wall);
+    const outsideR = routesOf().filter(r => r && r.wall === wall && r.face === outsideFace && (r.startMm < face.fromMm || r.endMm > face.toMm)).length;
+    const sentence = outsideFaceSentence(outsideF, outsideR);
+    if (sentence) {
       const note = svgEl('text', { x: (x0 + x1) / 2, y: -280, 'font-size': 170, fill: '#23324d', 'text-anchor': 'middle', 'data-testid': 'wall-outside' }, content);
-      const n = outside.length;
-      note.textContent = `${n} ${n === 1 ? 'fitting is' : 'fittings are'} outside this zone. Choose Whole floor to see them.`;
+      note.textContent = sentence;
     }
   } else {
     lT.textContent = `Wall ${wall} · ${(fullL / 1000).toFixed(2)} m — viewed from inside`;
@@ -1341,6 +1527,8 @@ function renderWall(content, wall, { W, D, H }, forPrint = false, show = isShown
     pl.setAttribute('data-index', job.annotations[wall].indexOf(s));
     if (clipId) pl.setAttribute('clip-path', `url(#${clipId})`);
   }
+  drawFaceRoutes(content, wall, exteriorFace(wall), H, face);
+  paintRoutePreview(content, H, face);
   return { L, H, fromMm: x0, toMm: x1 };
 }
 
@@ -1423,6 +1611,8 @@ function renderInteriorFace(content, parsed, { H }, show = isShown) {
     const pl = svgEl('polyline', { points: s.points.map(pt => pt.join(',')).join(' '), fill: 'none', stroke: '#2266cc', 'stroke-width': 25, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', class: 'stroke' }, content);
     if (clipId) pl.setAttribute('clip-path', `url(#${clipId})`);
   }
+  drawFaceRoutes(content, parsed.id, parsed.face, H, clip);
+  paintRoutePreview(content, H, clip);
   return { L: fullL, H, fromMm: x0, toMm: x1 };
 }
 
@@ -1492,7 +1682,7 @@ function renderCanvas() {
       + (placeLayerHidden ? ` Its layer (${C.LAYER_LABELS[placeLayer]}) is hidden and will be shown when you place it.` : ''),
     draw: 'Sketches are notes only, shared by all layers. They are never priced.',
     notes: 'Tap to add a note. Notes are shared by all layers.',
-    build: wallPreviewHint() || (zoneTool ? 'Tap two corners on the plan. The second tap adds the zone.' : 'Add a wall or a zone by two taps, or enter its size.'),
+    build: routePreviewHint() || wallPreviewHint() || (zoneTool ? 'Tap two corners on the plan. The second tap adds the zone.' : (view === 'PLAN' ? 'Add a wall or a zone by two taps, or enter its size.' : 'Add trunking or conduit by two taps, or enter its size.')),
   }[mode] || '';
   renderLayerEmpty();
 }
@@ -1573,10 +1763,37 @@ function renderLayers() {
     panel.appendChild(row);
   }
   const all = el('button', { class: 'layer-all', 'data-key': 'all', 'data-testid': 'layers-show-all' }, 'Show all');
-  all.disabled = allShown();
-  all.addEventListener('click', () => applyLayers(new Set(C.LAYERS)));
+  all.disabled = allShown() && showContainment.trunking && showContainment.conduit;
+  all.addEventListener('click', () => {
+    showContainment = { trunking: true, conduit: true };
+    applyLayers(new Set(C.LAYERS));
+  });
   panel.appendChild(all);
   panel.appendChild(el('p', { class: 'layers-note' }, 'Hiding a layer only changes the drawing. The quote, CSV and whole-job print still include every fitting. Sketches and notes are shared by all layers and always show.'));
+  panel.appendChild(el('p', { class: 'layers-title' }, 'Containment'));
+  for (const kind of ['trunking', 'conduit']) {
+    const n = routesOf().filter(route => route && route.type === kind).length;
+    const row = el('div', { class: 'layer-row' });
+    const lbl = el('label', { class: 'layer-check' });
+    const cb = el('input', { type: 'checkbox', 'data-testid': `containment-${kind}` });
+    cb.checked = !!showContainment[kind];
+    cb.addEventListener('change', () => {
+      showContainment = { ...showContainment, [kind]: cb.checked };
+      const selected = routeById(selectedRoute);
+      if (selected && !showContainment[selected.type]) {
+        const label = Routes.routeLabel(selected);
+        const name = selected.type === 'conduit' ? 'Conduit' : 'Trunking';
+        selectedRoute = null;
+        toast(`${label} is no longer selected because ${name} is hidden.`);
+      }
+      renderAll();
+    });
+    const name = kind === 'trunking' ? 'Trunking' : 'Conduit';
+    lbl.append(cb, el('span', {}, `${name} (${n})`));
+    row.appendChild(lbl);
+    panel.appendChild(row);
+  }
+  panel.appendChild(el('p', { class: 'layers-note', 'data-testid': 'containment-warning' }, CONTAINMENT_WARNING));
   const target = focusKey && panel.querySelector(`[data-key="${focusKey}"]`);
   if (target && !target.disabled) target.focus({ preventScroll: true });
   else if (focusKey) btn.focus({ preventScroll: true });
@@ -1617,12 +1834,14 @@ function renderTabs() {
       view = 'PLAN';
       zoneTool = { first: null };
       wallTool = null;
+      routeTool = null;
       setMode('build');
       renderAll();
       return;
     }
     const nextZone = sel.value || null;
     if (selectedId && !selectionVisible(selectedId, nextZone)) selectedId = null;
+    dropRoutePoint();
     zoneId = nextZone;
     zoneNotesOpen = false;
     if (zoneId && PHONE.matches) inspectorCollapsed = true;
@@ -1672,6 +1891,7 @@ function renderTabs() {
     b.addEventListener('click', () => {
       if (zoneTool && zoneTool.first) zoneTool = { first: null };
       if (wallTool && wallTool.first) wallTool = { first: null, hover: null };
+      dropRoutePoint();
       view = d.v;
       // a copied downlight can only go on the ceiling in the plan view
       if (copyTpl && copyTpl.type === 'downlight' && view !== 'PLAN' && endCopy()) toast('Stopped placing copies. Downlights can only be copied in the plan view.');
@@ -1682,7 +1902,13 @@ function renderTabs() {
   if (faces.childElementCount > 5) faces.classList.add('faces-scroll');
   renderZoneNotes(tabs);
   const activeFace = faces.querySelector('button.active');
-  if (activeFace && PHONE.matches && faces.classList.contains('faces-scroll')) activeFace.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+  // scroll only the face row; scrollIntoView would also slide the clipped #app sideways
+  if (activeFace && PHONE.matches && faces.classList.contains('faces-scroll')) {
+    const row = faces.getBoundingClientRect();
+    const tab = activeFace.getBoundingClientRect();
+    if (tab.left < row.left) faces.scrollLeft -= row.left - tab.left;
+    else if (tab.right > row.right) faces.scrollLeft += tab.right - row.right;
+  }
 }
 
 function renderQuote() {
@@ -1845,7 +2071,7 @@ function sideWord(face) {
 }
 function attachmentReport(id) {
   const fittings = (job.items || []).filter(it => it && it.wall === id).map(it => it.id);
-  const routes = ((job.floor && job.floor.routes) || []).filter(r => r && r.wall === id).map(r => r.id);
+  const routes = ((job.floor && job.floor.routes) || []).filter(r => r && r.wall === id).map(r => Routes.routeLabel(r));
   const sketchFaces = [];
   for (const key of Object.keys(job.annotations || {})) {
     const parsed = Walls.parseFaceView(key);
@@ -1874,8 +2100,8 @@ function wouldStrand(before, next) {
     if (!route || route.wall !== before.id) continue;
     const start = Walls.carriedOffset(before, next, route.face, route.startMm);
     const end = Walls.carriedOffset(before, next, route.face, route.endMm);
-    if (Walls.attachmentProblem(next, route.face, start, 'fitting') || Walls.attachmentProblem(next, route.face, end, 'fitting')) {
-      routes.push(route.id);
+    if (Walls.attachmentProblem(next, route.face, start, 'route') || Walls.attachmentProblem(next, route.face, end, 'route')) {
+      routes.push(Routes.routeLabel(route));
     }
   }
   for (const pin of job.notePins || []) {
@@ -1908,9 +2134,10 @@ function showWallAttachments(id) {
   for (const candidate of faces) {
     const key = `${id}.${candidate}`;
     const hasItem = (job.items || []).some(it => it.wall === id && it.face === candidate);
+    const hasRoute = routesOf().some(route => route.wall === id && route.face === candidate);
     const hasSketch = Array.isArray(job.annotations && job.annotations[key]) && job.annotations[key].length;
     const hasPin = (job.notePins || []).some(pin => pin.view === key);
-    if (hasItem || hasSketch || hasPin) { face = candidate; break; }
+    if (hasItem || hasRoute || hasSketch || hasPin) { face = candidate; break; }
   }
   if (face) {
     const key = `${id}.${face}`;
@@ -1919,7 +2146,8 @@ function showWallAttachments(id) {
   }
   highlightIds = report.fittings.slice();
   selectedId = report.fittings[0] || null;
-  selectedWall = selectedId ? null : id;
+  selectedRoute = selectedId ? null : (routesOf().find(route => route.wall === id) || {}).id || null;
+  selectedWall = selectedId || selectedRoute ? null : id;
   if (PHONE.matches) inspectorCollapsed = true;
   renderAll();
 }
@@ -2104,6 +2332,7 @@ function openWallSizeForm() {
     if (!id || !wallRecord(id)) return false;
     selectedWall = id;
     selectedId = null;
+    selectedRoute = null;
     wallTool = { first: null, hover: null };
     const made = wallRecord(id);
     toast(`Added ${id}, ${wallLengthText(made)} long. Undo removes it.`);
@@ -2222,7 +2451,88 @@ function inspectorRoomPanel() {
   legend.appendChild(el('li', {}, 'F1, F2… are fitting numbers. The letters after the dot are the fitting type.'));
   legend.appendChild(el('li', {}, 'Dashed circles are ceiling fittings (plan view only)'));
   legend.appendChild(el('li', {}, 'Use “Layers” above the drawing to show lighting, sockets & spurs or three-phase on their own or together.'));
+  legend.appendChild(el('li', {}, 'T1, T2… trunking, drawn as a solid amber band.'));
+  legend.appendChild(el('li', {}, 'C1, C2… conduit, drawn as a dashed blue line.'));
+  legend.appendChild(el('li', { 'data-testid': 'containment-warning' }, CONTAINMENT_WARNING));
   box.appendChild(legend);
+}
+function inspectorRoutePanel() {
+  const route = routeById(selectedRoute);
+  const box = $('#inspector');
+  box.innerHTML = '';
+  const label = route ? Routes.routeLabel(route) : 'Run';
+  const head = el('div', { class: 'inspector-head' });
+  head.append(el('h2', {}, label), inspectorToggle());
+  box.appendChild(head);
+  if (!route || inspectorCollapsed) return;
+  const wall = Routes.wallGeometry(job, route.wall);
+  const length = wall ? Walls.wallLength(wall) : 0;
+  const fields = {
+    type: el('select', { 'data-testid': 'route-type' }),
+    start: zoneField('Start', 'route-start', String(route.startMm), true),
+    end: zoneField('End', 'route-end', String(route.endMm), true),
+    height: zoneField('Height', 'route-height', String(route.heightMm), true),
+    notes: el('textarea', { 'data-testid': 'route-notes', maxlength: '200' }),
+  };
+  fields.type.append(el('option', { value: 'trunking' }, 'Trunking'), el('option', { value: 'conduit' }, 'Conduit'));
+  fields.type.value = route.type;
+  fields.notes.value = route.notes || '';
+  const apply = () => applyRouteFields(route, fields, length);
+  for (const [labelText, input] of [['Type', fields.type], ['Start (mm)', fields.start], ['End (mm)', fields.end], ['Height (mm)', fields.height], ['Notes', fields.notes]]) {
+    box.appendChild(el('label', {}, labelText));
+    box.appendChild(input);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply(); } });
+  }
+  const go = el('button', { class: 'btn-primary', 'data-testid': 'route-apply' }, 'Apply');
+  go.addEventListener('click', apply);
+  box.appendChild(go);
+  box.appendChild(el('p', { class: 'field-note', 'data-testid': 'containment-warning' }, CONTAINMENT_WARNING));
+  const remove = el('button', { class: 'btn-danger', 'data-testid': 'route-remove' }, 'Remove run');
+  remove.addEventListener('click', () => {
+    const id = route.id;
+    const name = Routes.routeLabel(route);
+    const prior = snapshot();
+    commit(() => { C.removeRoute(job, id); }, { exact: true });
+    if (snapshot() === prior) return;
+    selectedRoute = null;
+    toast(`Removed ${name}. Undo brings it back.`);
+    renderAll();
+  });
+  box.appendChild(remove);
+}
+function applyRouteFields(route, fields, length) {
+  const start = readWholeMm(fields.start);
+  const end = readWholeMm(fields.end);
+  const height = readWholeMm(fields.height);
+  if (start === null || end === null || height === null) { toast('Enter whole millimetres.'); return; }
+  const spec = {
+    type: fields.type.value,
+    wall: route.wall,
+    face: route.face,
+    startMm: start,
+    endMm: end,
+    heightMm: height,
+    notes: fields.notes.value.slice(0, 200),
+  };
+  if (spec.type === route.type && spec.startMm === route.startMm && spec.endMm === route.endMm
+    && spec.heightMm === route.heightMm && spec.notes === route.notes) {
+    toast('Nothing changed.');
+    return;
+  }
+  const blocked = clipRefusal(spec);
+  if (blocked) { toast(blocked); renderAll(); return; }
+  if (start < 0 || end > length || start >= end) {
+    toast(`Keep the run on this wall, which is ${(length / 1000).toFixed(2)} m long.`);
+    renderAll();
+    return;
+  }
+  if (end - start < 50) { toast('A run must be at least 50 mm long.'); renderAll(); return; }
+  const ceiling = C.ceilingHeightMm(job.room);
+  if (height < 0 || height > ceiling) { toast(`Height must be 0 to ${ceiling} mm.`); renderAll(); return; }
+  const prior = snapshot();
+  commit(() => { C.replaceRoute(job, route.id, spec); }, { exact: true });
+  if (snapshot() === prior) return;
+  toast(`Updated ${Routes.routeLabel(routeById(route.id) || route)}.`);
 }
 
 // "Set height for several" panel: count, removable rows, current-height summary,
@@ -2325,6 +2635,7 @@ function renderInspector() {
   if (multiIds) { inspectorMultiPanel(); return; }
   const item = job.items.find(i => i.id === selectedId);
   if (!item) {
+    if (selectedRoute && routeById(selectedRoute)) { inspectorRoutePanel(); return; }
     if (selectedWall) { inspectorWallPanel(); return; }
     if (activeZone()) { inspectorZonePanel(); return; }
     inspectorRoomPanel();
@@ -2543,18 +2854,23 @@ function renderAll() {
   const zNow = activeZone();
   if (selectedWall && !wallRecord(selectedWall) && !C.WALLS.includes(selectedWall)) selectedWall = null;
   if (view !== 'PLAN' && !scopeFaces().some(face => face.view === view)) view = 'PLAN';
-  if (!dragFitting && !zoneEdgeDrag && !wallDrag && !panning) {
+  if (selectedRoute && !routeById(selectedRoute)) selectedRoute = null;
+  if (selectedRoute && !routeInScope(routeById(selectedRoute))) selectedRoute = null;
+  if (mode === 'build' && paletteView !== view) buildPalette();
+  if (!dragFitting && !zoneEdgeDrag && !wallDrag && !routeDrag && !panning) {
     if (selectedId && selectedId !== lastDetailsId && mode === 'select' && !PHONE.matches && !multiIds) inspectorCollapsed = false;
-    if (!selectedId && selectedWall && selectedWall !== lastWallDetails && mode === 'select' && !PHONE.matches && !multiIds) inspectorCollapsed = false;
-    if (!selectedId && !selectedWall && zoneId && zoneId !== lastZoneDetails && !PHONE.matches && !multiIds) inspectorCollapsed = false;
+    if (!selectedId && selectedRoute && selectedRoute !== lastRouteDetails && mode === 'select' && !PHONE.matches && !multiIds) inspectorCollapsed = false;
+    if (!selectedId && !selectedRoute && selectedWall && selectedWall !== lastWallDetails && mode === 'select' && !PHONE.matches && !multiIds) inspectorCollapsed = false;
+    if (!selectedId && !selectedRoute && !selectedWall && zoneId && zoneId !== lastZoneDetails && !PHONE.matches && !multiIds) inspectorCollapsed = false;
     lastDetailsId = selectedId;
     lastZoneDetails = zoneId;
     lastWallDetails = selectedWall;
+    lastRouteDetails = selectedRoute;
   }
   // A rebuild of the same panel (a save, a layer change) keeps the reader's
   // scroll position; a different panel starts at the top.
   const insBox = $('#inspector');
-  const insKey = `${currentId}|${selectedId}|${selectedWall || ''}|${zoneId || ''}|${multiIds ? 'multi' : ''}|${inspectorCollapsed}`;
+  const insKey = `${currentId}|${selectedId}|${selectedRoute || ''}|${selectedWall || ''}|${zoneId || ''}|${multiIds ? 'multi' : ''}|${inspectorCollapsed}`;
   const keepTop = insKey === lastInspectorKey ? insBox.scrollTop : 0;
   lastInspectorKey = insKey;
   renderTabs(); renderLayers(); renderCanvas(); renderInspector(); renderQuote();
@@ -2612,7 +2928,7 @@ function openRoomForm() {
           }
           vals[k] = Math.round(v * 100) / 100;
         }
-        const zoneBlock = F.outsideFloorMessage(job, vals.widthM, vals.depthM);
+        const zoneBlock = F.outsideFloorMessage(job, vals.widthM, vals.depthM, vals.heightM);
         if (zoneBlock) { errP.hidden = false; errP.textContent = zoneBlock; return; }
         const outside = C.itemsOutside(job, vals.widthM, vals.depthM, vals.heightM);
         if (outside.length) { closeModal(); askShrink(vals, outside); return; }
@@ -2874,7 +3190,7 @@ function buildPrintPack(includeInk = true, layers = null) {
   scopeNote(p1);
   p1.appendChild(svgFor('PLAN'));
   const legend = el('p', { style: 'font-size:9.5pt' });
-  legend.textContent = Object.values(C.TYPES).map(t => `${t.symbol} = ${t.label}`).join(' · ') + ' · downlights shown dashed on the ceiling';
+  legend.textContent = Object.values(C.TYPES).map(t => `${t.symbol} = ${t.label}`).join(' · ') + ' · downlights shown dashed on the ceiling · T trunking (solid band), C conduit (dashed line). ' + CONTAINMENT_WARNING;
   p1.appendChild(legend);
   p1.appendChild(el('h2', {}, 'Room and job notes'));
   p1.appendChild(el('p', {}, `${job.room.widthM.toFixed(2)} × ${job.room.depthM.toFixed(2)} × ${job.room.heightM.toFixed(2)} m (w × d × h)`));
@@ -3081,8 +3397,9 @@ function beginJob(j, prefs = null) {
   clearTimeout(saveTimer);
   refusedNumber = null;
   job = j && j.schemaVersion === 2 ? C.normaliseJobV2(j) : C.normaliseJob(j);
-  history = []; redoStack = []; selectedId = null; zoneId = null; zoneTool = null; zoneGesture = null; view = 'PLAN'; zoom = { s: 1, tx: 0, ty: 0 }; multiIds = null; multiDraft = ''; multiPending = null;
+  history = []; redoStack = []; selectedId = null; selectedRoute = null; selectedWall = null; zoneId = null; zoneTool = null; zoneGesture = null; wallTool = null; wallGesture = null; routeTool = null; routeGesture = null; routeDrag = null; view = 'PLAN'; zoom = { s: 1, tx: 0, ty: 0 }; multiIds = null; multiDraft = ''; multiPending = null;
   shownLayers = new Set(C.LAYERS); layersOpen = false;
+  showContainment = { trunking: true, conduit: true };
   // remembered type and heights belong to this job; copy mode never crosses jobs
   jobPrefs = J.cleanPrefs(prefs);
   placeType = jobPrefs.lastType ?? 'surface';
@@ -3597,7 +3914,7 @@ function explainWideTouch(width) {
 function cancelInteraction() {
   const drag = dragFitting;
   pinch = null; drawingStroke = null; panning = null; dragFitting = null; owner = null; zoneGesture = null; zoneEdgeDrag = null;
-  wallGesture = null; wallDrag = null;
+  wallGesture = null; wallDrag = null; routeGesture = null; routeDrag = null;
   multiPending = null; // a cancelled or pinched tap never toggles
   if (drag) { job = C.normaliseJob(JSON.parse(drag.pre)); renderAll(); }
   else renderCanvas();
@@ -3776,6 +4093,12 @@ $('#canvas').addEventListener('pointerdown', (e) => {
     noteInput(e, 'zone');
     return;
   }
+  if (mode === 'build' && !fingerOnly && view !== 'PLAN' && routeTool) {
+    routeGesture = { id: e.pointerId, sx: e.clientX, sy: e.clientY, p };
+    owner = e.pointerId;
+    noteInput(e, 'route');
+    return;
+  }
   if (mode === 'select' && !fingerOnly) {
     if (multiIds) {
       // Multi mode: a tap toggles a fitting; empty space only pans and never
@@ -3792,7 +4115,7 @@ $('#canvas').addEventListener('pointerdown', (e) => {
       // a dense spot selects nothing yet unless one of its fittings was already
       // chosen — the chooser on lift names the fitting
       selectedId = res.id;
-      if (res.id) selectedWall = null;
+      if (res.id) { selectedWall = null; selectedRoute = null; }
       // A tap-select arms a drag but nothing moves until the pointer travels
       // TAP_SLOP_PX: a small wobble selects without nudging the fitting. The
       // grab offset keeps the fitting where the finger took hold of it. A drag
@@ -3805,6 +4128,41 @@ $('#canvas').addEventListener('pointerdown', (e) => {
         cands: res.cands,
       };
     } else {
+      const routeHandle = e.target.closest && e.target.closest('.route-handle');
+      if (routeHandle) {
+        if (controlCovers(routeHandle)) {
+          zoom = { s: 1, tx: 0, ty: 0 };
+          renderAll();
+          noteInput(e, 'fit');
+          return;
+        }
+        const which = routeHandle.getAttribute('data-which');
+        const rid = routeHandle.getAttribute('data-route');
+        const rec = routeById(rid);
+        routeDrag = rec ? {
+          id: e.pointerId, which, routeId: rid,
+          sx: e.clientX, sy: e.clientY,
+          origin: { startMm: rec.startMm, endMm: rec.endMm, heightMm: rec.heightMm, wall: rec.wall, face: rec.face, type: rec.type, notes: rec.notes },
+          live: null,
+        } : null;
+        selectedRoute = rid;
+        selectedId = null;
+        selectedWall = null;
+        owner = e.pointerId;
+        noteInput(e, 'route-handle');
+        return;
+      }
+      const routeHit = e.target.closest && e.target.closest('.route-hit');
+      if (routeHit) {
+        selectedRoute = routeHit.getAttribute('data-route');
+        selectedId = null;
+        selectedWall = null;
+        highlightIds = null;
+        owner = e.pointerId;
+        noteInput(e, 'route');
+        renderAll();
+        return;
+      }
       const wallHandle = view === 'PLAN' && e.target.closest && e.target.closest('.wall-handle');
       if (wallHandle) {
         if (controlCovers(wallHandle)) {
@@ -3824,6 +4182,7 @@ $('#canvas').addEventListener('pointerdown', (e) => {
         } : null;
         selectedWall = wid;
         selectedId = null;
+        selectedRoute = null;
         owner = e.pointerId;
         noteInput(e, 'wall-handle');
         return;
@@ -3832,6 +4191,7 @@ $('#canvas').addEventListener('pointerdown', (e) => {
       if (wallHit) {
         selectedWall = wallHit.getAttribute('data-wall');
         selectedId = null;
+        selectedRoute = null;
         highlightIds = null;
         owner = e.pointerId;
         noteInput(e, 'wall');
@@ -3981,6 +4341,11 @@ $('#canvas').addEventListener('pointermove', (e) => {
     const hover = svgPoint(e);
     if (hover) { wallTool.hover = hover; renderCanvas(); }
   }
+  if (routeTool && routeTool.first && mode === 'build' && view !== 'PLAN' && !pointers.has(e.pointerId)) {
+    const hover = svgPoint(e);
+    const snapped = hover && snapFacePoint(hover);
+    if (snapped) { routeTool.hover = snapped; renderCanvas(); }
+  }
   if (e.pointerType === 'pen') lastPenAt = performance.now(); // includes hover
   if (e.pointerId === lastDown.id && !lastDown.end) lastDown.moves += 1;
   if (!pointers.has(e.pointerId)) return;
@@ -4061,6 +4426,17 @@ $('#canvas').addEventListener('pointermove', (e) => {
     }
     return;
   }
+  if (routeDrag && routeDrag.id === e.pointerId) {
+    const drag = routeDrag;
+    if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < TAP_SLOP_PX) return;
+    const snapped = snapRouteOffset(drag.origin, p);
+    const live = { startMm: drag.origin.startMm, endMm: drag.origin.endMm };
+    if (drag.which === 'start') live.startMm = snapped;
+    else live.endMm = snapped;
+    drag.live = live;
+    renderCanvas();
+    return;
+  }
   if (wallDrag && wallDrag.id === e.pointerId) {
     const drag = wallDrag;
     if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < TAP_SLOP_PX) return;
@@ -4109,6 +4485,38 @@ function endPointer(e) {
     zoneGesture = null;
     panning = null;
     if (Math.hypot(e.clientX - g.sx, e.clientY - g.sy) < TAP_SLOP_PX) finishZoneTap(g.p);
+    return;
+  }
+  if (routeGesture && routeGesture.id === e.pointerId) {
+    const g = routeGesture;
+    routeGesture = null;
+    panning = null;
+    if (Math.hypot(e.clientX - g.sx, e.clientY - g.sy) < TAP_SLOP_PX) finishRouteTap(g.p);
+    return;
+  }
+  if (routeDrag && routeDrag.id === e.pointerId) {
+    const drag = routeDrag;
+    routeDrag = null;
+    const moved = Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) >= TAP_SLOP_PX;
+    if (!moved || !drag.live) { renderCanvas(); return; }
+    let startMm = drag.live.startMm;
+    let endMm = drag.live.endMm;
+    if (startMm > endMm) { const swap = startMm; startMm = endMm; endMm = swap; }
+    const same = startMm === drag.origin.startMm && endMm === drag.origin.endMm;
+    if (!same) {
+      const spec = {
+        type: drag.origin.type,
+        wall: drag.origin.wall,
+        face: drag.origin.face,
+        startMm,
+        endMm,
+        heightMm: drag.origin.heightMm,
+        notes: drag.origin.notes,
+      };
+      const blocked = clipRefusal(spec);
+      if (blocked) { toast(blocked); renderAll(); return; }
+      commit(() => { C.replaceRoute(job, drag.routeId, spec); }, { exact: true });
+    } else renderAll();
     return;
   }
   if (wallDrag && wallDrag.id === e.pointerId) {
@@ -4212,9 +4620,11 @@ function endPointer(e) {
         zoneId = pan.pendingZone;
         selectedWall = null;
         highlightIds = null;
+        if (selectedRoute && !routeInScope(routeById(selectedRoute))) selectedRoute = null;
         if (PHONE.matches) inspectorCollapsed = true;
       } else if (pan.pendingClear) {
         selectedId = null;
+        selectedRoute = null;
         if (view === 'PLAN') { selectedWall = null; highlightIds = null; }
       }
       renderAll();
@@ -4325,6 +4735,7 @@ function finishWallTap(p) {
   if (id && wallRecord(id)) {
     selectedWall = id;
     selectedId = null;
+    selectedRoute = null;
     const made = wallRecord(id);
     toast(`Added ${id}, ${wallLengthText(made)} long. Undo removes it.`);
     focusWall();
@@ -4373,6 +4784,161 @@ function boundsForEdge(origin, edge, value) {
   else if (edge === 'e') next.x1 = Math.round(value);
   return next;
 }
+function faceGuides(length, clip) {
+  const guides = [0, length];
+  if (clip) guides.push(clip.fromMm, clip.toMm);
+  return guides;
+}
+function snapFaceOffset(mm, length, clip) {
+  return Math.round(F.snapNearest(mm, screenMm(12), faceGuides(length, clip)));
+}
+function snapFaceHeight(mm, ceiling) {
+  return Math.round(F.snapNearest(mm, screenMm(12), [0, ceiling]));
+}
+function snapFacePoint(p) {
+  const ctx = faceContext();
+  if (!ctx || !p) return null;
+  const dims = roomMm();
+  return {
+    offset: snapFaceOffset(p.x, ctx.length, ctx.clip),
+    height: snapFaceHeight(dims.H - p.y, dims.H),
+  };
+}
+function snapRouteOffset(origin, p) {
+  const wall = Routes.wallGeometry(job, origin.wall);
+  if (!wall) return origin.startMm;
+  let raw = p.x;
+  if (view === 'PLAN') {
+    const off = Walls.offsetFromPlan(wall, origin.face, p);
+    if (off === null) return origin.startMm;
+    raw = off;
+  }
+  const clip = scopeClipFor(origin);
+  return snapFaceOffset(raw, Walls.wallLength(wall), clip);
+}
+function routePreviewHint() {
+  if (!routeTool || !routeTool.first || view === 'PLAN' || !job || !job.floor) return '';
+  const n = job.floor.nextRouteNo;
+  const prefix = routeTool.type === 'conduit' ? 'C' : 'T';
+  const height = routeTool.first.height;
+  if (!routeTool.hover) return `${prefix}${n} · ${height} mm high`;
+  const from = Math.min(routeTool.first.offset, routeTool.hover.offset);
+  const to = Math.max(routeTool.first.offset, routeTool.hover.offset);
+  return `${prefix}${n} · ${from} to ${to} mm · ${height} mm high`;
+}
+function focusRoute() {
+  inspectorCollapsed = !!PHONE.matches;
+  renderAll();
+}
+function acceptRoutePoint(snapped, ctx) {
+  if (!ctx || !snapped) return 'Open a wall face before adding a run.';
+  if (snapped.height < 0 || snapped.height > C.ceilingHeightMm(job.room)) {
+    return `Height must be 0 to ${C.ceilingHeightMm(job.room)} mm.`;
+  }
+  if (snapped.offset < 0 || snapped.offset > ctx.length) {
+    return `Keep the run on this wall, which is ${(ctx.length / 1000).toFixed(2)} m long.`;
+  }
+  if (ctx.clip && (snapped.offset < ctx.clip.fromMm || snapped.offset > ctx.clip.toMm)) {
+    return 'Keep both ends inside the part of the wall that belongs to this zone.';
+  }
+  return null;
+}
+function finishRouteTap(p) {
+  if (!routeTool || view === 'PLAN' || !job || !job.floor) return;
+  const ctx = faceContext();
+  const snapped = snapFacePoint(p);
+  const problem = acceptRoutePoint(snapped, ctx);
+  if (problem) { toast(problem); return; }
+  if (!routeTool.first) {
+    routeTool = { type: routeTool.type, first: snapped, hover: null };
+    if (PHONE.matches) inspectorCollapsed = true;
+    renderAll();
+    return;
+  }
+  const start = Math.min(routeTool.first.offset, snapped.offset);
+  const end = Math.max(routeTool.first.offset, snapped.offset);
+  const spec = {
+    type: routeTool.type,
+    wall: ctx.wallId,
+    face: ctx.face,
+    startMm: start,
+    endMm: end,
+    heightMm: routeTool.first.height,
+    notes: '',
+  };
+  const blocked = clipRefusal(spec) || (end - start < 50 ? 'A run must be at least 50 mm long.' : null);
+  if (blocked) { toast(blocked); renderCanvas(); return; }
+  let id = null;
+  const ok = commit(() => { id = C.addRoute(job, spec); }, { exact: true });
+  if (!ok || !id || !routeById(id)) return;
+  routeTool = { type: routeTool.type, first: null, hover: null };
+  selectedRoute = id;
+  selectedId = null;
+  selectedWall = null;
+  highlightIds = null;
+  toast(`Added ${Routes.routeLabel(routeById(id))}. Undo removes it.`);
+  focusRoute();
+}
+function openRouteSizeForm() {
+  const ctx = faceContext();
+  if (!ctx) { toast('Open a wall face before entering a run.'); return; }
+  const box = el('div');
+  const type = el('select', { 'data-testid': 'route-type' });
+  type.append(el('option', { value: 'trunking' }, 'Trunking'), el('option', { value: 'conduit' }, 'Conduit'));
+  type.value = routeTool && routeTool.type === 'conduit' ? 'conduit' : 'trunking';
+  const fields = {
+    start: zoneField('Start', 'route-start', '', true),
+    end: zoneField('End', 'route-end', '', true),
+    height: zoneField('Height', 'route-height', '', true),
+    notes: el('textarea', { 'data-testid': 'route-notes', maxlength: '200' }),
+  };
+  box.append(
+    el('label', {}, 'Type'), type,
+    el('label', {}, 'Start (mm)'), fields.start,
+    el('label', {}, 'End (mm)'), fields.end,
+    el('label', {}, 'Height (mm)'), fields.height,
+    el('label', {}, 'Notes'), fields.notes,
+  );
+  const add = () => {
+    const start = readWholeMm(fields.start);
+    const end = readWholeMm(fields.end);
+    const height = readWholeMm(fields.height);
+    if (start === null || end === null || height === null) { toast('Enter whole millimetres.'); return false; }
+    const spec = {
+      type: type.value,
+      wall: ctx.wallId,
+      face: ctx.face,
+      startMm: start,
+      endMm: end,
+      heightMm: height,
+      notes: fields.notes.value.slice(0, 200),
+    };
+    const blocked = clipRefusal(spec);
+    if (blocked) { toast(blocked); return false; }
+    let id = null;
+    commit(() => { id = C.addRoute(job, spec); }, { exact: true });
+    if (!id || !routeById(id)) return false;
+    selectedRoute = id;
+    selectedId = null;
+    selectedWall = null;
+    highlightIds = null;
+    routeTool = { type: spec.type, first: null, hover: null };
+    toast(`Added ${Routes.routeLabel(routeById(id))}. Undo removes it.`);
+    focusRoute();
+    return true;
+  };
+  for (const input of [fields.start, fields.end, fields.height]) {
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      if (add()) closeModal();
+    });
+  }
+  modal('Run size', [box], [
+    { label: 'Cancel', fn: closeModal },
+    { label: 'Add', class: 'btn-primary', testid: 'route-add', fn: () => { if (add()) closeModal(); } },
+  ]);
+}
 function setMode(m) {
   if (!MODES.includes(m)) return;
   const leftMulti = m !== 'select' && !!multiIds;
@@ -4381,8 +4947,9 @@ function setMode(m) {
   if (m !== mode) {
     zoneTool = m === 'build' ? zoneTool : null;
     wallTool = m === 'build' ? wallTool : null;
+    routeTool = m === 'build' ? routeTool : null;
   }
-  if (m !== 'build') { zoneTool = null; wallTool = null; }
+  if (m !== 'build') { zoneTool = null; wallTool = null; routeTool = null; }
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   $('#place-palette').hidden = m !== 'place' && m !== 'build';
@@ -4395,6 +4962,32 @@ document.querySelectorAll('.mode-btn[data-mode]').forEach(b => b.addEventListene
 function buildPalette() {
   const pal = $('#place-palette');
   pal.innerHTML = '';
+  paletteView = view;
+  if (mode === 'build' && view !== 'PLAN') {
+    pal.appendChild(el('p', { class: 'palette-title' }, 'Build'));
+    const addTrunk = el('button', { class: 'pal-btn' + (routeTool && routeTool.type === 'trunking' ? ' active' : ''), 'data-testid': 'build-add-trunking' }, 'Add trunking');
+    addTrunk.addEventListener('click', () => {
+      routeTool = { type: 'trunking', first: null, hover: null };
+      wallTool = null;
+      zoneTool = null;
+      buildPalette();
+      renderCanvas();
+    });
+    const addConduit = el('button', { class: 'pal-btn' + (routeTool && routeTool.type === 'conduit' ? ' active' : ''), 'data-testid': 'build-add-conduit' }, 'Add conduit');
+    addConduit.addEventListener('click', () => {
+      routeTool = { type: 'conduit', first: null, hover: null };
+      wallTool = null;
+      zoneTool = null;
+      buildPalette();
+      renderCanvas();
+    });
+    const sizes = el('button', { class: 'pal-btn', 'data-testid': 'build-enter-sizes' }, 'Enter sizes…');
+    sizes.addEventListener('click', () => openRouteSizeForm());
+    const cancel = el('button', { class: 'pal-btn', 'data-testid': 'build-cancel' }, 'Cancel');
+    cancel.addEventListener('click', () => { routeTool = null; buildPalette(); renderCanvas(); });
+    pal.append(addTrunk, addConduit, sizes, cancel);
+    return;
+  }
   if (mode === 'build') {
     pal.appendChild(el('p', { class: 'palette-title' }, 'Build'));
     const addWall = el('button', { class: 'pal-btn' + (wallTool ? ' active' : ''), 'data-testid': 'build-add-wall' }, 'Add wall');
@@ -4402,6 +4995,7 @@ function buildPalette() {
       view = 'PLAN';
       wallTool = { first: null, hover: null };
       zoneTool = null;
+      routeTool = null;
       buildPalette();
       renderCanvas();
     });
@@ -4410,13 +5004,14 @@ function buildPalette() {
       view = 'PLAN';
       zoneTool = { first: null };
       wallTool = null;
+      routeTool = null;
       buildPalette();
       renderCanvas();
     });
     const sizes = el('button', { class: 'pal-btn', 'data-testid': 'build-enter-sizes' }, 'Enter sizes…');
     sizes.addEventListener('click', () => { if (wallTool) openWallSizeForm(); else openZoneSizeForm(); });
     const cancel = el('button', { class: 'pal-btn', 'data-testid': 'build-cancel' }, 'Cancel');
-    cancel.addEventListener('click', () => { zoneTool = null; wallTool = null; buildPalette(); renderCanvas(); });
+    cancel.addEventListener('click', () => { zoneTool = null; wallTool = null; routeTool = null; buildPalette(); renderCanvas(); });
     pal.append(addWall, add, sizes, cancel);
     return;
   }
@@ -4533,9 +5128,10 @@ document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
   else if ((e.ctrlKey && e.key.toLowerCase() === 'y') || (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'z')) { e.preventDefault(); redo(); }
   else if (e.key === 'Delete' && selectedId) { commit(() => { job.items = job.items.filter(i => i.id !== selectedId); }); toast(`${selectedId} deleted · Undo`); selectedId = null; renderAll(); }
-  else if (e.key === 'Escape' && ((zoneTool && zoneTool.first) || (wallTool && wallTool.first))) {
+  else if (e.key === 'Escape' && ((zoneTool && zoneTool.first) || (wallTool && wallTool.first) || (routeTool && routeTool.first))) {
     if (zoneTool) zoneTool = { first: null };
     if (wallTool) wallTool = { first: null, hover: null };
+    dropRoutePoint();
     renderCanvas();
   }
   else if (e.key === 'Escape' && copyTpl) cancelCopy(); // leaves copy mode with nothing added

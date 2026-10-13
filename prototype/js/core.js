@@ -16,10 +16,17 @@ import {
   interiorMarkError,
   attachmentProblem,
 } from './floor-walls.js';
+import {
+  carriedRun,
+  copyRoute,
+  routesError,
+  runOffWall,
+  wallGeometry,
+} from './floor-routes.js';
 
 export const SCHEMA = 'surface-job';
 export const SCHEMA_VERSION = 1;
-export const BUILD = 'surface-proto-v14-floor-walls-20261013';
+export const BUILD = 'surface-proto-v15-floor-routes-20261013';
 
 export const LIMITS = {
   maxWallM: 20,        // room width / depth
@@ -234,6 +241,14 @@ function remapWallAttachments(trial, id, before, wall) {
       }
     }
   }
+  for (const route of (trial.floor && trial.floor.routes) || []) {
+    if (!route || route.wall !== id) continue;
+    const moved = carriedRun(before, wall, route);
+    route.startMm = moved.startMm;
+    route.endMm = moved.endMm;
+    const problem = runOffWall(wall, route.face, route.startMm, route.endMm);
+    if (problem) return problem;
+  }
   return null;
 }
 
@@ -254,6 +269,13 @@ function copyWallAttachments(job, trial, id) {
     if (!parsed || parsed.id !== id) continue;
     if (!job.annotations) job.annotations = {};
     job.annotations[key] = JSON.parse(JSON.stringify(trial.annotations[key]));
+  }
+  for (const route of (trial.floor && trial.floor.routes) || []) {
+    if (!route || route.wall !== id) continue;
+    const live = ((job.floor && job.floor.routes) || []).find(item => item && item.id === route.id);
+    if (!live) continue;
+    live.startMm = route.startMm;
+    live.endMm = route.endMm;
   }
 }
 
@@ -289,6 +311,9 @@ export function removeWall(job, id) {
   if (!trial || !trial.floor || !Array.isArray(trial.floor.walls)) throw new Error('This job has no floor.');
   if (!trial.floor.walls.some(wall => wall.id === id)) throw new Error(MSG.missingWall);
   if (wallHasAttachment(trial, id)) throw new Error(MSG.removeBlocked);
+  if ((trial.floor.routes || []).some(route => route && route.wall === id)) {
+    throw new Error('Remove the runs on this wall first.');
+  }
   trial.floor.walls = trial.floor.walls.filter(wall => wall.id !== id);
   cleanEmptyFaceKeys(trial, id);
   const v = validateJobV2(trial);
@@ -298,11 +323,81 @@ export function removeWall(job, id) {
 }
 
 export function faceOffsetToPlan(job, wallId, face, offsetMm) {
-  const wall = wallOn(job, wallId);
+  const wall = wallGeometry(job, wallId);
   if (!wall) throw new Error(MSG.missingWall);
   const plan = planFromOffset(wall, face, offsetMm);
   if (!plan) throw new Error(MSG.badFace);
   return { x: plan.x, y: plan.y };
+}
+
+function routeFromSpec(id, spec, notesFallback) {
+  const notes = spec && Object.prototype.hasOwnProperty.call(spec, 'notes') ? spec.notes : notesFallback;
+  return {
+    id,
+    type: spec && spec.type,
+    wall: spec && spec.wall,
+    face: spec && spec.face,
+    startMm: spec && spec.startMm,
+    endMm: spec && spec.endMm,
+    heightMm: spec && spec.heightMm,
+    notes: notes === undefined ? '' : notes,
+  };
+}
+
+// Adds one straight run on a wall face. A refusal throws and leaves the job untouched.
+export function addRoute(job, spec) {
+  const trial = cloneData(job);
+  const floor = trial && trial.floor;
+  const n = floor && floor.nextRouteNo;
+  const route = routeFromSpec('R' + n, spec, '');
+  if (floor && Array.isArray(floor.routes) && Number.isInteger(n)) {
+    floor.routes.push(route);
+    floor.nextRouteNo = n + 1;
+  }
+  const v = validateJobV2(trial);
+  if (!v.ok) throw new Error(v.errors[0]);
+  job.floor.routes.push(copyRoute(route));
+  job.floor.nextRouteNo = n + 1;
+  return route.id;
+}
+
+// Replaces one run. The id stays put. A refusal throws and leaves the job untouched.
+export function replaceRoute(job, id, spec) {
+  const trial = cloneData(job);
+  if (!trial || !trial.floor || !Array.isArray(trial.floor.routes)) throw new Error('This job has no floor.');
+  const route = trial.floor.routes.find(item => item && item.id === id);
+  if (!route) throw new Error('That run is not on this floor.');
+  const next = routeFromSpec(id, spec, route.notes);
+  route.type = next.type;
+  route.wall = next.wall;
+  route.face = next.face;
+  route.startMm = next.startMm;
+  route.endMm = next.endMm;
+  route.heightMm = next.heightMm;
+  route.notes = next.notes;
+  const v = validateJobV2(trial);
+  if (!v.ok) throw new Error(v.errors[0]);
+  const live = job.floor.routes.find(item => item && item.id === id);
+  live.type = route.type;
+  live.wall = route.wall;
+  live.face = route.face;
+  live.startMm = route.startMm;
+  live.endMm = route.endMm;
+  live.heightMm = route.heightMm;
+  live.notes = route.notes;
+  return id;
+}
+
+// Removes one run. The route counter stays, so the id is not reused.
+export function removeRoute(job, id) {
+  const trial = cloneData(job);
+  if (!trial || !trial.floor || !Array.isArray(trial.floor.routes)) throw new Error('This job has no floor.');
+  const next = trial.floor.routes.filter(item => item && item.id !== id);
+  if (next.length === trial.floor.routes.length) throw new Error('That run is not on this floor.');
+  trial.floor.routes = next;
+  const v = validateJobV2(trial);
+  if (!v.ok) throw new Error(v.errors[0]);
+  job.floor.routes = job.floor.routes.filter(item => item && item.id !== id);
 }
 
 // Removes one zone. The zone counter stays where it is, so the ID is not reused.
@@ -724,11 +819,12 @@ function floorErrors(job) {
   const wallErr = wallsError(floor.walls, floor.nextWallNo, wallLengthMm(job.room, 'A'), wallLengthMm(job.room, 'B'), job.room);
   if (wallErr) return [wallErr];
   if (!Array.isArray(floor.routes)) return ['floor.routes: not an array'];
-  if (floor.routes.length > 0) return ['floor.routes: not accepted yet'];
   if (!Array.isArray(floor.zones)) return ['floor.zones: not an array'];
   if (!Number.isInteger(floor.nextWallNo) || floor.nextWallNo < 1) return ['floor.nextWallNo: invalid'];
   if (!Number.isInteger(floor.nextZoneNo) || floor.nextZoneNo < 1) return ['floor.nextZoneNo: invalid'];
   if (!Number.isInteger(floor.nextRouteNo) || floor.nextRouteNo < 1) return ['floor.nextRouteNo: invalid'];
+  const routeErr = routesError(job);
+  if (routeErr) return [routeErr];
   if (floor.zones.length > MAX_ZONES) return ['This floor already has 30 zones, which is the most it can hold.'];
 
   const widthMm = wallLengthMm(job.room, 'A');
@@ -833,7 +929,7 @@ export function normaliseJobV2(job) {
   out.floor = {
     walls: f.walls.map(w => ({ id: w.id, x1: w.x1, y1: w.y1, x2: w.x2, y2: w.y2 })),
     zones: f.zones.map(z => ({ id: z.id, name: z.name, x0: z.x0, y0: z.y0, x1: z.x1, y1: z.y1 })),
-    routes: f.routes.map(r => ({ ...r })),
+    routes: f.routes.map(r => copyRoute(r)),
     nextWallNo: f.nextWallNo,
     nextZoneNo: f.nextZoneNo,
     nextRouteNo: f.nextRouteNo,
