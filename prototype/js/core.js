@@ -27,7 +27,7 @@ import {
 
 export const SCHEMA = 'surface-job';
 export const SCHEMA_VERSION = 1;
-export const BUILD = 'surface-proto-v17-floor-final-20261013';
+export const BUILD = 'surface-proto-v18-floor-fixes-20261013';
 
 export const LIMITS = {
   maxWallM: 20,        // room width / depth

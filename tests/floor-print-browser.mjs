@@ -213,6 +213,39 @@ async function sheetText(page, wall, face) {
   return sheet;
 }
 
+// The barber sample has no zones, interior walls or routes, so it prints the legacy pack, and its
+// fitting tables are long. Two walls and their tables cannot share one A4 landscape sheet, so each
+// wall prints on its own numbered page and "Page n of N" still matches the paper.
+async function legacyLongTables(browserHandle, prof, dir) {
+  const context = await browserHandle.newContext({
+    viewport: { width: prof.width, height: prof.height },
+    hasTouch: prof.touch,
+    isMobile: prof.mobile,
+    serviceWorkers: 'allow',
+  });
+  const page = await context.newPage();
+  page.setDefaultTimeout(15000);
+  page.setDefaultNavigationTimeout(20000);
+  const errors = [];
+  page.on('pageerror', (err) => errors.push(String(err)));
+  await page.addInitScript(() => { window.print = () => { window.__printed = (window.__printed || 0) + 1; }; });
+  try {
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => document.documentElement.dataset.jobsBoot === 'ready');
+    await press(page.locator('[data-testid="start-sample"]'), prof.touch);
+    await page.locator('#btn-job-name').waitFor({ state: 'visible' });
+    await openPrint(page, prof.touch);
+    await goPrint(page, prof.touch);
+    if (await page.locator('#print-pack .wall-sheet').count() !== 0) fail('barber sample used the zone pack');
+    const heads = (await page.locator('#print-pack .page.legacy-walls h2').allInnerTexts()).filter((h) => /^Wall /.test(h));
+    if (JSON.stringify(heads) !== JSON.stringify(['Wall A', 'Wall B', 'Wall C', 'Wall D'])) fail(`barber legacy walls ${JSON.stringify(heads)}`);
+    await pdfFitsPages(page, path.join(dir, 'legacy-long.pdf'));
+    if (errors.length) fail(`barber print page errors ${errors.join(' | ')}`);
+  } finally {
+    await context.close();
+  }
+}
+
 async function runProfile(browserHandle, prof) {
   const dir = path.join(EV, prof.key);
   fs.mkdirSync(dir, { recursive: true });
@@ -471,6 +504,9 @@ async function runProfile(browserHandle, prof) {
     if (JSON.stringify(await screenState(page)) !== JSON.stringify(plainState)) fail('legacy print changed the screen');
     await pdfFitsPages(page, path.join(dir, 'legacy.pdf'));
     steps.push('legacy-four-page');
+
+    await legacyLongTables(browserHandle, prof, dir);
+    steps.push('legacy-long-tables');
 
     if (pageErrors.length) fail(`page errors ${pageErrors.join(' | ')}`);
     if (external.length) fail(`external requests: ${external.join(' | ')}`);

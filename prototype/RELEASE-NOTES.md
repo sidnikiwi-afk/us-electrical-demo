@@ -1,3 +1,9 @@
+# Floor fixes, 13 October 2026
+
+Build `surface-proto-v18-floor-fixes-20261013` keeps wall A clear of the Layers and zoom buttons after Fit, including on a phone with the details open. A run whose two ends are the same number now says it must be at least 50 mm long, and that edit adds no history step. When a legacy wall pair and its fitting table would run onto a second sheet, each wall is printed on its own page, and a table that is still too long is split, so the numbered pages match the paper. The print dialog uses that same count.
+
+---
+
 # Floor final, 13 October 2026
 
 Build `surface-proto-v17-floor-final-20261013` adds interior walls, face views, containment runs, and the zoned print pack, on top of named zones.

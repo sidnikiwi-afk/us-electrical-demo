@@ -274,6 +274,32 @@ async function planClick(page, x, y) {
   await page.mouse.click(p.x, p.y);
 }
 
+// Every point along wall A (plan y 0 to 80 mm, the whole room width) must reach the canvas,
+// not a floating control such as #btn-layers or #zoom-controls.
+async function assertTopWallClear(page, label) {
+  const problems = await page.evaluate(() => {
+    const svg = document.querySelector('#canvas');
+    const world = svg.querySelector('#world');
+    const ctm = world.getScreenCTM();
+    const out = [];
+    for (let x = 0; x <= 9000; x += 250) {
+      for (const y of [0, 80]) {
+        const pt = svg.createSVGPoint();
+        pt.x = x;
+        pt.y = y;
+        const s = pt.matrixTransform(ctm);
+        const hit = document.elementFromPoint(s.x, s.y);
+        if (!hit || !svg.contains(hit)) {
+          const id = hit ? hit.tagName.toLowerCase() + (hit.id ? `#${hit.id}` : '') : 'nothing';
+          out.push(`(${x},${y}) -> ${id}`);
+        }
+      }
+    }
+    return out;
+  });
+  if (problems.length) fail(`${label}: wall A is covered: ${problems.slice(0, 6).join('; ')}${problems.length > 6 ? ` (+${problems.length - 6})` : ''}`);
+}
+
 async function openDetails(page, touch) {
   const show = page.getByRole('button', { name: 'Show details', exact: true });
   if (await show.count() && await show.first().isVisible()) await press(show.first(), touch);
@@ -401,9 +427,12 @@ async function runProfile(browserHandle, prof) {
     // A later scope change keeps that fitting when it is still visible.
     await press(page.locator('#mode-rail [data-mode="place"]'), prof.touch);
     await press(await onlyVisible(page, 'pal-surface'), prof.touch);
-    // a surface socket on wall A inside Bay; at 3.5 m it is clear of the floating Layers and zoom
-    // buttons, which sit over the top wall on phone while details are open
-    await planClick(page, 3500, 80);
+    // Fit keeps wall A clear of the floating Layers and zoom controls, even on phone with
+    // details open, so a surface socket at 1.5 m on wall A inside Bay can be placed
+    await openDetails(page, prof.touch);
+    await press(page.locator('#btn-zoom-fit'), prof.touch);
+    await assertTopWallClear(page, 'after Fit with details open');
+    await planClick(page, 1500, 80);
     await page.locator('#canvas .fitting[data-id="F1"]').waitFor({ state: 'attached' });
     await openDetails(page, prof.touch);
     const fittingHead = (await page.locator('#inspector h2').first().innerText()).trim();
@@ -420,7 +449,7 @@ async function runProfile(browserHandle, prof) {
     if (await page.locator('#inspector [data-testid="ins-type"]').count()) fail('fitting stayed selected after the zone was created');
     await chooseZone(page, 'Whole floor');
     await press(page.locator('#mode-rail [data-mode="select"]'), prof.touch);
-    await planClick(page, 3500, 260);
+    await planClick(page, 1500, 260);
     await openDetails(page, prof.touch);
     const wholeHead = (await page.locator('#inspector h2').first().innerText()).trim();
     if (!wholeHead.includes('F1')) fail(`whole floor did not keep the fitting: ${JSON.stringify(wholeHead)}`);

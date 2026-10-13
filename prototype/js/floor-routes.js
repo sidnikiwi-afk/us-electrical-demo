@@ -9,7 +9,7 @@ import {
   wallLength,
 } from './floor-walls.js';
 
-export const BUILD = 'surface-proto-v17-floor-final-20261013';
+export const BUILD = 'surface-proto-v18-floor-fixes-20261013';
 export const MAX_ROUTES = 100;
 export const MIN_ROUTE_MM = 50;
 export const MAX_NOTES = 200;
