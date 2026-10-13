@@ -25,3 +25,11 @@ jobs:
         run: |
           node tests/floor-zone-browser.mjs
           node tests/floor-zone-safety-browser.mjs
+      - name: Wall, containment and print journeys on four screen sizes
+        env:
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/node_modules/playwright/index.mjs
+        run: |
+          node tests/floor-wall-browser.mjs
+          node tests/floor-route-browser.mjs
+          node tests/floor-print-tracer-browser.mjs
+          node tests/floor-print-browser.mjs
