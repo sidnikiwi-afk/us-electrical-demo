@@ -4,8 +4,9 @@ import * as C from './core.js';
 import * as J from './jobs-v2.js';
 import * as V1 from './jobs.js';
 import * as F from './floor-zones.js';
+import * as Walls from './floor-walls.js';
 
-const BUILD = 'surface-proto-v13-floor-zones-20261012';
+const BUILD = 'surface-proto-v14-floor-walls-20261013';
 const buildMixed = BUILD !== C.BUILD || BUILD !== J.BUILD;
 
 const NS = 'http://www.w3.org/2000/svg';
@@ -50,7 +51,14 @@ let zoneId = null;              // scope: null is the whole floor
 let zoneTool = null;            // { first: {x,y}|null } while Add zone is waiting for taps
 let zoneGesture = null;         // pointer that started a zone tap; committed on lift
 let zoneEdgeDrag = null;        // one edge handle; the job changes on lift only
+let wallTool = null;            // { first: {x,y}|null, hover } while Add wall is waiting
+let wallGesture = null;         // pointer that started a wall tap; committed on lift
+let wallDrag = null;            // end handle; the job changes on lift only
+let selectedWall = null;        // 'A'..'D' or 'W1' while a wall is inspected
+let highlightIds = null;        // fittings shown after "Show them"
+let zoneNotesOpen = false;
 let lastZoneDetails = null;
+let lastWallDetails = null;
 // "Set height for several" sub-state of the Select tool: multiIds is null when
 // off and an array of fitting IDs when on. multiDraft keeps the typed height
 // across panel rebuilds; multiPending holds a tap awaiting the 12-px threshold.
@@ -183,12 +191,13 @@ function toast(msg, ms = 2600) {
 // ---- History (undo/redo) ---------------------------------------------------
 function snapshot() { return JSON.stringify(job); }
 function commit(mutate, opts = {}) {
-  // Exception-safe: a mutation that throws (e.g. item cap) changes nothing and
-  // leaves no empty undo frame. Zone edits pass exact so the refusal is the
-  // validator sentence on its own.
+  // A throw restores the snapshot taken before the attempt. The refusal is
+  // byte for byte the previous job and adds no undo frame. Zone and wall
+  // edits pass exact so the refusal is the validator sentence on its own.
   const pre = snapshot();
   try { mutate(); }
   catch (err) {
+    try { job = JSON.parse(pre); } catch { /* the snapshot is our own JSON */ }
     const msg = err && err.message ? err.message : 'That change was not applied.';
     toast(opts.exact ? msg : `Change not applied — ${msg}`);
     renderAll();
@@ -930,6 +939,11 @@ function roomMm() {
 function planPos(item) {
   const { W, D } = roomMm();
   const f = item.fromLeftMm;
+  if (Walls.isWallId(item.wall)) {
+    const wall = wallRecord(item.wall);
+    const plan = wall && item.face ? Walls.planFromOffset(wall, item.face, f) : null;
+    return plan || { x: f, y: 0 };
+  }
   switch (item.wall) {
     case 'A': return { x: f, y: 0 };
     case 'B': return { x: W, y: f };
@@ -937,6 +951,12 @@ function planPos(item) {
     case 'D': return { x: 0, y: D - f };
     default: return { x: item.fromLeftMm, y: item.heightMm }; // ceiling: (x across width, y across depth)
   }
+}
+function wallRecord(id) {
+  return (job && job.floor && Array.isArray(job.floor.walls) ? job.floor.walls : []).find(w => w.id === id) || null;
+}
+function interiorWalls() {
+  return F.wallsOf(job);
 }
 // Inverse: plan point + chosen wall → fromLeft. Returns null if not near that wall.
 function wallParamsFromPlan(x, y, wall) {
@@ -957,6 +977,45 @@ function nearestWallFromPlan(x, y) {
   // perpendicular wall via a negative distance.
   const dists = { A: Math.abs(y), B: Math.abs(W - x), C: Math.abs(D - y), D: Math.abs(x) };
   return Object.keys(dists).reduce((a, b) => dists[a] <= dists[b] ? a : b);
+}
+// Nearest face within the existing plan threshold. The face is the side the
+// tap landed on. Exterior walls only offer their inner face. A tap past the
+// end of an interior wall does not jump onto that wall.
+function nearestFaceFromPlan(x, y) {
+  const { W, D } = roomMm();
+  const NEAR = Math.max(300, Math.round(Math.min(W, D) * 0.12));
+  let best = null;
+  const take = (cand) => {
+    if (!cand || cand.dist > NEAR) return;
+    if (!best || cand.dist < best.dist) best = cand;
+  };
+  const exterior = [
+    { wall: 'A', dist: Math.abs(y), ok: y <= NEAR, fromLeft: Math.round(x) },
+    { wall: 'B', dist: Math.abs(W - x), ok: x >= W - NEAR, fromLeft: Math.round(y) },
+    { wall: 'C', dist: Math.abs(D - y), ok: y >= D - NEAR, fromLeft: Math.round(W - x) },
+    { wall: 'D', dist: Math.abs(x), ok: x <= NEAR, fromLeft: Math.round(D - y) },
+  ];
+  for (const edge of exterior) {
+    if (!edge.ok) continue;
+    take({ wall: edge.wall, face: null, dist: edge.dist, fromLeft: edge.fromLeft });
+  }
+  for (const wall of interiorWalls()) {
+    const axis = Walls.wallAxis(wall);
+    if (axis === 'H') {
+      if (x < wall.x1 || x > wall.x2) continue;
+      const dist = Math.abs(y - wall.y1);
+      const face = y < wall.y1 ? 'N' : 'S';
+      const fromLeft = face === 'S' ? x - wall.x1 : wall.x2 - x;
+      take({ wall: wall.id, face, dist, fromLeft: Math.round(fromLeft) });
+    } else if (axis === 'V') {
+      if (y < wall.y1 || y > wall.y2) continue;
+      const dist = Math.abs(x - wall.x1);
+      const face = x > wall.x1 ? 'E' : 'W';
+      const fromLeft = face === 'W' ? y - wall.y1 : wall.y2 - y;
+      take({ wall: wall.id, face, dist, fromLeft: Math.round(fromLeft) });
+    }
+  }
+  return best;
 }
 
 // ---- Drawing: plan and wall views --------------------------------------------
@@ -1012,7 +1071,7 @@ function renderPlan(content, { W, D }, show = isShown) {
       class: 'zone-rect', 'data-zone': z.id,
     }, content);
     if (!on) continue;
-    for (const face of F.positiveFaces(job.room, z)) {
+    for (const face of F.zoneTouchingFaces(job, z)) {
       const seg = faceMark(face, { W, D });
       if (!seg) continue;
       svgEl('line', {
@@ -1046,6 +1105,17 @@ function renderPlan(content, { W, D }, show = isShown) {
   if (zoneTool && zoneTool.first) {
     svgEl('circle', { cx: zoneTool.first.x, cy: zoneTool.first.y, r: 70, fill: '#23324d' }, content);
   }
+  drawInteriorWalls(content);
+  if (wallTool && wallTool.first) {
+    svgEl('circle', { cx: wallTool.first.x, cy: wallTool.first.y, r: 70, fill: '#23324d' }, content);
+    const aim = wallTool.hover ? lockedWall(wallTool.first, snapPlan(wallTool.hover)) : null;
+    if (aim) {
+      svgEl('line', {
+        x1: aim.x1, y1: aim.y1, x2: aim.x2, y2: aim.y2,
+        stroke: '#23324d', 'stroke-width': 28, 'stroke-dasharray': '80 50', 'pointer-events': 'none',
+      }, content);
+    }
+  }
   // wall labels: one label per wall, each with its length
   const dims = [
     { x: W / 2, y: -260, text: `Wall A · ${job.room.widthM.toFixed(2)} m`, wall: 'A' },
@@ -1074,8 +1144,10 @@ function renderPlan(content, { W, D }, show = isShown) {
       continue;
     }
     const p = planPos(item);
-    // sit just inside the wall line
-    const inset = { A: [0, 260], B: [-260, 0], C: [0, -260], D: [260, 0] }[item.wall];
+    // sit just inside the wall line, on the side the fitting belongs to
+    const inset = Walls.isWallId(item.wall)
+      ? { N: [0, -260], S: [0, 260], E: [260, 0], W: [-260, 0] }[item.face] || [0, 0]
+      : { A: [0, 260], B: [-260, 0], C: [0, -260], D: [260, 0] }[item.wall];
     const gx = p.x + inset[0], gy = p.y + inset[1];
     // default: label on the room side of the wall line (A: below, C: above)
     let below = item.wall !== 'C';
@@ -1090,13 +1162,29 @@ function renderPlan(content, { W, D }, show = isShown) {
   return { margin: 500 };
 }
 
+function scopeFaces() {
+  const z = activeZone();
+  return z ? F.zoneTouchingFaces(job, z) : F.wholeFloorFaces(job);
+}
+function faceForView(viewKey) {
+  return scopeFaces().find(face => face.view === viewKey) || null;
+}
 function zoneFaceFor(wall) {
   if (!zoneId || !job) return null;
   const z = F.zoneById(job, zoneId);
   if (!z) return null;
-  return F.positiveFaces(job.room, z).find(face => face.wall === wall) || null;
+  return F.zoneTouchingFaces(job, z).find(face => face.view === wall || (face.wall === wall && !face.interior)) || null;
 }
 function faceMark(face, { W, D }) {
+  if (face.interior) {
+    const wall = wallRecord(face.wall);
+    if (!wall) return null;
+    const a = Walls.planFromOffset(wall, face.face, face.fromMm);
+    const b = Walls.planFromOffset(wall, face.face, face.toMm);
+    if (!a || !b) return null;
+    const nudge = { N: [0, -50], S: [0, 50], E: [50, 0], W: [-50, 0] }[face.face] || [0, 0];
+    return { x1: a.x + nudge[0], y1: a.y + nudge[1], x2: b.x + nudge[0], y2: b.y + nudge[1] };
+  }
   if (face.wall === 'A') return { x1: face.fromMm, y1: 0, x2: face.toMm, y2: 0 };
   if (face.wall === 'B') return { x1: W, y1: face.fromMm, x2: W, y2: face.toMm };
   if (face.wall === 'C') return { x1: W - face.toMm, y1: D, x2: W - face.fromMm, y2: D };
@@ -1110,8 +1198,66 @@ function selectionVisible(id, nextZoneId) {
   const z = F.zoneById(job, nextZoneId);
   if (!z) return false;
   if (it.wall === C.CEILING) return it.fromLeftMm >= z.x0 && it.fromLeftMm <= z.x1 && it.heightMm >= z.y0 && it.heightMm <= z.y1;
-  const face = F.positiveFaces(job.room, z).find(f => f.wall === it.wall);
-  return !!(face && F.fittingOnFace(it, face));
+  return F.zoneTouchingFaces(job, z).some(face => F.fittingOnFace(it, face));
+}
+function drawInteriorWalls(content) {
+  if (!job || !job.floor) return;
+  const hit = screenMm(16);
+  const showHandles = mode === 'select' && content.ownerSVGElement && content.ownerSVGElement.id === 'canvas';
+  for (const src of interiorWalls()) {
+    const live = wallDrag && wallDrag.wallId === src.id && wallDrag.live ? wallDrag.live : src;
+    const on = selectedWall === src.id;
+    svgEl('line', {
+      x1: live.x1, y1: live.y1, x2: live.x2, y2: live.y2,
+      stroke: 'transparent', 'stroke-width': hit, class: 'wall-hit',
+      'data-wall': src.id, 'data-testid': `wall-${src.id}`,
+    }, content);
+    svgEl('line', {
+      x1: live.x1, y1: live.y1, x2: live.x2, y2: live.y2,
+      stroke: on ? '#23324d' : '#1a1a1a', 'stroke-width': on ? 48 : 28, 'pointer-events': 'none',
+    }, content);
+    const label = svgEl('text', {
+      x: (live.x1 + live.x2) / 2, y: (live.y1 + live.y2) / 2 - 80,
+      'text-anchor': 'middle', 'font-size': 200, fill: '#23324d', 'font-family': 'inherit', 'pointer-events': 'none',
+    }, content);
+    label.textContent = `${src.id} · ${(Walls.wallLength(live) / 1000).toFixed(2)} m`;
+    if (!on || !showHandles) continue;
+    const handle = screenMm(44);
+    for (const which of ['start', 'end']) {
+      const at = which === 'start' ? { x: live.x1, y: live.y1 } : { x: live.x2, y: live.y2 };
+      svgEl('rect', {
+        x: at.x - handle / 2, y: at.y - handle / 2, width: handle, height: handle,
+        fill: 'transparent', stroke: 'none', class: 'wall-handle',
+        'data-which': which, 'data-wall': src.id, 'data-testid': `wall-handle-${which}`,
+      }, content);
+      svgEl('rect', {
+        x: at.x - 50, y: at.y - 50, width: 100, height: 100,
+        fill: '#fff', stroke: '#23324d', 'stroke-width': 16, 'pointer-events': 'none',
+      }, content);
+    }
+  }
+  if (showHandles) {
+    const { W, D } = roomMm();
+    const edges = [
+      { id: 'A', x1: 0, y1: 0, x2: W, y2: 0 },
+      { id: 'B', x1: W, y1: 0, x2: W, y2: D },
+      { id: 'C', x1: 0, y1: D, x2: W, y2: D },
+      { id: 'D', x1: 0, y1: 0, x2: 0, y2: D },
+    ];
+    for (const edge of edges) {
+      svgEl('line', {
+        x1: edge.x1, y1: edge.y1, x2: edge.x2, y2: edge.y2,
+        stroke: 'transparent', 'stroke-width': hit, class: 'wall-hit',
+        'data-wall': edge.id, 'data-testid': `wall-${edge.id}`,
+      }, content);
+      if (selectedWall === edge.id) {
+        svgEl('line', {
+          x1: edge.x1, y1: edge.y1, x2: edge.x2, y2: edge.y2,
+          stroke: '#23324d', 'stroke-width': 48, 'pointer-events': 'none',
+        }, content);
+      }
+    }
+  }
 }
 function renderWall(content, wall, { W, D, H }, forPrint = false, show = isShown) {
   const fullL = (wall === 'A' || wall === 'C') ? W : D;
@@ -1198,19 +1344,106 @@ function renderWall(content, wall, { W, D, H }, forPrint = false, show = isShown
   return { L, H, fromMm: x0, toMm: x1 };
 }
 
+function outsideFaceSentence(fittings, routes) {
+  const bits = [];
+  if (fittings) bits.push(`${fittings} ${fittings === 1 ? 'fitting' : 'fittings'}`);
+  if (routes) bits.push(`${routes} ${routes === 1 ? 'route' : 'routes'}`);
+  if (!bits.length) return '';
+  const noun = bits.length === 1 ? bits[0] : `${bits[0]} and ${bits[1]}`;
+  const verb = (fittings + routes) === 1 ? 'is' : 'are';
+  return `${noun} on this face ${verb} outside this zone. Choose Whole floor to see them.`;
+}
+
+function renderInteriorFace(content, parsed, { H }, show = isShown) {
+  const wall = wallRecord(parsed.id);
+  if (!wall) return { L: 0, H, fromMm: 0, toMm: 0 };
+  const fullL = Walls.wallLength(wall);
+  const clip = zoneId ? faceForView(view) : null;
+  const x0 = clip ? clip.fromMm : 0;
+  const x1 = clip ? clip.toMm : fullL;
+  const side = { N: 'north', E: 'east', S: 'south', W: 'west' }[parsed.face] || parsed.face;
+  const sideLabel = `${parsed.id} ${side} side`;
+  svgEl('line', { x1: x0, y1: H, x2: x1, y2: H, stroke: '#1a1a1a', 'stroke-width': 40 }, content);
+  const hT = svgEl('text', { x: x1 + 380, y: H / 2, 'font-size': 240, fill: '#555', 'font-family': 'inherit', 'text-anchor': 'middle', transform: `rotate(-90 ${x1 + 380} ${H / 2})` }, content);
+  hT.textContent = `${job.room.heightM.toFixed(2)} m`;
+  svgEl('rect', {
+    x: x0, y: 0, width: Math.max(1, x1 - x0), height: H,
+    fill: '#fff', stroke: '#1a1a1a', 'stroke-width': 25,
+  }, content);
+  const lT = svgEl('text', { x: (x0 + x1) / 2, y: H + 420, 'font-size': 220, fill: '#23324d', 'text-anchor': 'middle', 'font-family': 'inherit', 'data-testid': 'wall-caption' }, content);
+  if (clip && zoneId) {
+    const z = activeZone();
+    lT.textContent = `${z ? z.name : 'Zone'} · ${sideLabel} · ${(clip.fromMm / 1000).toFixed(2)} to ${(clip.toMm / 1000).toFixed(2)} m of ${(fullL / 1000).toFixed(2)} m`;
+    for (const mm of [clip.fromMm, clip.toMm]) {
+      svgEl('line', { x1: mm, y1: H, x2: mm, y2: H + 120, stroke: '#23324d', 'stroke-width': 12 }, content);
+      const tick = svgEl('text', { x: mm, y: H + 280, 'font-size': 160, fill: '#23324d', 'text-anchor': 'middle', 'data-testid': 'wall-ruler' }, content);
+      tick.textContent = `${(mm / 1000).toFixed(2)} m`;
+    }
+    if (clip.fromMm > 0) {
+      const c = svgEl('text', { x: x0, y: -80, 'font-size': 180, fill: '#555', 'data-testid': 'wall-continues' }, content);
+      c.textContent = 'Wall continues';
+    }
+    if (clip.toMm < fullL) {
+      const c = svgEl('text', { x: x1, y: -80, 'font-size': 180, fill: '#555', 'text-anchor': 'end', 'data-testid': 'wall-continues' }, content);
+      c.textContent = 'Wall continues';
+    }
+    const outsideF = job.items.filter(i => i.wall === parsed.id && i.face === parsed.face && !F.fittingOnFace(i, clip)).length;
+    const outsideR = ((job.floor && job.floor.routes) || []).filter(r => r && r.wall === parsed.id && r.face === parsed.face && (r.startMm < clip.fromMm || r.endMm > clip.toMm || r.startMm > clip.toMm || r.endMm < clip.fromMm)).length;
+    const sentence = outsideFaceSentence(outsideF, outsideR);
+    if (sentence) {
+      const note = svgEl('text', { x: (x0 + x1) / 2, y: -280, 'font-size': 170, fill: '#23324d', 'text-anchor': 'middle', 'data-testid': 'wall-outside' }, content);
+      note.textContent = sentence;
+    }
+  } else {
+    lT.textContent = `${sideLabel} · ${(fullL / 1000).toFixed(2)} m`;
+    for (const mm of [0, fullL]) {
+      svgEl('line', { x1: mm, y1: H, x2: mm, y2: H + 120, stroke: '#23324d', 'stroke-width': 12 }, content);
+      const tick = svgEl('text', { x: mm, y: H + 280, 'font-size': 160, fill: '#23324d', 'text-anchor': 'middle', 'data-testid': 'wall-ruler' }, content);
+      tick.textContent = `${(mm / 1000).toFixed(2)} m`;
+    }
+  }
+  for (const item of job.items) {
+    if (!show(item) || item.wall !== parsed.id || item.face !== parsed.face) continue;
+    if (clip && !F.fittingOnFace(item, clip)) continue;
+    content.appendChild(fittingGlyph(item, item.fromLeftMm, H - item.heightMm));
+    if (item.id === selectedId) {
+      svgEl('line', { x1: x0, y1: H - item.heightMm, x2: item.fromLeftMm, y2: H - item.heightMm, stroke: '#b26a00', 'stroke-width': 18, 'stroke-dasharray': '80 50' }, content);
+      svgEl('line', { x1: item.fromLeftMm, y1: H, x2: item.fromLeftMm, y2: H - item.heightMm, stroke: '#b26a00', 'stroke-width': 18, 'stroke-dasharray': '80 50' }, content);
+    }
+  }
+  let clipId = null;
+  if (clip) {
+    clipId = `zone-face-clip-${parsed.id}-${parsed.face}`;
+    const defs = svgEl('defs', {}, content);
+    const cp = svgEl('clipPath', { id: clipId }, defs);
+    svgEl('rect', { x: x0, y: -2000, width: Math.max(1, x1 - x0), height: H + 4000 }, cp);
+  }
+  const key = view;
+  for (const s of job.annotations[key] || []) {
+    const pl = svgEl('polyline', { points: s.points.map(pt => pt.join(',')).join(' '), fill: 'none', stroke: '#2266cc', 'stroke-width': 25, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', class: 'stroke' }, content);
+    if (clipId) pl.setAttribute('clip-path', `url(#${clipId})`);
+  }
+  return { L: fullL, H, fromMm: x0, toMm: x1 };
+}
+
 function renderCanvas() {
   const svg = $('#canvas');
   svg.innerHTML = '';
   if (!job || !job.room || !job.room.widthM) { svg.setAttribute('viewBox', '0 0 100 100'); renderLayerEmpty(); return; }
   const dims = roomMm();
   let vbX = -900, vbY = -900, vbW, vbH;
-  const clipFace = view === 'PLAN' ? null : zoneFaceFor(view);
+  const interior = Walls.parseFaceView(view);
+  const clipFace = view === 'PLAN' ? null : (zoneId ? faceForView(view) : null);
   if (view === 'PLAN') { vbW = dims.W + 1800; vbH = dims.D + 1800; }
   else if (clipFace) {
     const span = Math.max(100, clipFace.toMm - clipFace.fromMm);
     vbX = clipFace.fromMm - 900;
     vbW = span + 1800;
     vbH = dims.H + 1800;
+  } else if (interior) {
+    const wall = wallRecord(interior.id);
+    const L = wall ? Walls.wallLength(wall) : 0;
+    vbW = Math.max(100, L) + 1800; vbH = dims.H + 1800;
   } else {
     const L = (view === 'A' || view === 'C') ? dims.W : dims.D;
     vbW = L + 1800; vbH = dims.H + 1800;
@@ -1219,6 +1452,7 @@ function renderCanvas() {
   const world = svgEl('g', { id: 'world', transform: `translate(${zoom.tx} ${zoom.ty}) scale(${zoom.s})` }, svg);
   const content = svgEl('g', {}, world);
   if (view === 'PLAN') renderPlan(content, dims);
+  else if (interior) renderInteriorFace(content, interior, dims);
   else renderWall(content, view, dims);
   // note pins
   const pins = (job.notePins || []).filter(p => {
@@ -1243,6 +1477,13 @@ function renderCanvas() {
     const sel = svg.querySelector(`.fitting[data-id="${selectedId}"]`);
     if (sel) { const r = svgEl('rect', { x: -180, y: -180, width: 360, height: 360, fill: 'none', stroke: '#2266cc', 'stroke-width': 40 }); sel.insertBefore(r, sel.firstChild); }
   }
+  if (highlightIds) {
+    for (const id of highlightIds) {
+      if (id === selectedId) continue;
+      const sel = svg.querySelector(`.fitting[data-id="${id}"]`);
+      if (sel) { const r = svgEl('rect', { x: -180, y: -180, width: 360, height: 360, fill: 'none', stroke: '#b45309', 'stroke-width': 30 }); sel.insertBefore(r, sel.firstChild); }
+    }
+  }
   const placeLayer = copyTpl ? (copyTpl.layer ?? C.defaultLayerFor(copyTpl.type)) : C.defaultLayerFor(placeType);
   const placeLayerHidden = !shownLayers.has(placeLayer);
   $('#hint').textContent = multiIds ? 'Tap fittings to add or remove them, then enter one height.' : {
@@ -1251,7 +1492,7 @@ function renderCanvas() {
       + (placeLayerHidden ? ` Its layer (${C.LAYER_LABELS[placeLayer]}) is hidden and will be shown when you place it.` : ''),
     draw: 'Sketches are notes only, shared by all layers. They are never priced.',
     notes: 'Tap to add a note. Notes are shared by all layers.',
-    build: zoneTool ? 'Tap two corners on the plan. The second tap adds the zone.' : 'Add a zone by two taps, or enter its size.',
+    build: wallPreviewHint() || (zoneTool ? 'Tap two corners on the plan. The second tap adds the zone.' : 'Add a wall or a zone by two taps, or enter its size.'),
   }[mode] || '';
   renderLayerEmpty();
 }
@@ -1261,7 +1502,12 @@ function renderLayerEmpty() {
   const box = $('#layer-empty');
   let msg = '';
   if (job && job.room && job.room.widthM) {
-    const here = view === 'PLAN' ? job.items : job.items.filter(i => i.wall === view || i.wall === C.CEILING);
+    const parsedView = Walls.parseFaceView(view);
+    const here = view === 'PLAN'
+      ? job.items
+      : job.items.filter(i => parsedView
+        ? (i.wall === parsedView.id && i.face === parsedView.face)
+        : (i.wall === view || i.wall === C.CEILING));
     const hiddenHere = here.filter(i => !isShown(i)).length;
     if (!shownLayers.size) msg = `All layers are hidden.${hiddenHere ? ` ${hiddenHere} fitting${hiddenHere === 1 ? '' : 's'} on this view aren’t shown.` : ''}`;
     else if (here.length && hiddenHere === here.length) msg = `Nothing shown on this view. ${hiddenHere} fitting${hiddenHere === 1 ? ' is' : 's are'} on hidden layers.`;
@@ -1339,15 +1585,20 @@ function renderLayers() {
 // ---- Tabs, quote bar, inspector ----------------------------------------------
 function activeZone() { return zoneId ? F.zoneById(job, zoneId) : null; }
 function renderZoneNotes(host) {
-  const notes = el('div', { class: 'zone-notes', 'data-testid': 'zone-notes' });
+  const notes = el('div', { class: 'zone-notes' + (zoneNotesOpen ? ' zone-notes-open' : ''), 'data-testid': 'zone-notes' });
   const z = activeZone();
-  const faces = z ? F.positiveFaces(job.room, z) : [];
+  const faces = z ? F.zoneTouchingFaces(job, z) : [];
   if (!z) notes.appendChild(el('p', {}, '\u00a0'));
   else if (!faces.length) notes.appendChild(el('p', {}, 'This zone has no walls yet. Add one in Build mode.'));
   else {
     const lines = F.edgeNotes(z, faces);
-    if (!lines.length) notes.appendChild(el('p', {}, 'Every edge of this zone meets an outside wall.'));
-    else for (const line of lines) notes.appendChild(el('p', {}, line));
+    const shown = zoneNotesOpen ? lines : lines.slice(0, 2);
+    for (const line of shown) notes.appendChild(el('p', {}, line));
+    if (!zoneNotesOpen && lines.length > 2) {
+      const more = el('button', { type: 'button', 'data-testid': 'zone-notes-more' }, 'More');
+      more.addEventListener('click', () => { zoneNotesOpen = true; renderTabs(); });
+      notes.appendChild(more);
+    }
   }
   host.appendChild(notes);
 }
@@ -1365,6 +1616,7 @@ function renderTabs() {
       zoneId = null;
       view = 'PLAN';
       zoneTool = { first: null };
+      wallTool = null;
       setMode('build');
       renderAll();
       return;
@@ -1372,9 +1624,9 @@ function renderTabs() {
     const nextZone = sel.value || null;
     if (selectedId && !selectionVisible(selectedId, nextZone)) selectedId = null;
     zoneId = nextZone;
+    zoneNotesOpen = false;
     if (zoneId && PHONE.matches) inspectorCollapsed = true;
-    const z = activeZone();
-    if (z && view !== 'PLAN' && !F.positiveFaces(job.room, z).some(face => face.wall === view)) view = 'PLAN';
+    if (view !== 'PLAN' && !scopeFaces().some(face => face.view === view)) view = 'PLAN';
     renderAll();
   });
   tabs.appendChild(sel);
@@ -1387,15 +1639,18 @@ function renderTabs() {
     return { text: filtered ? `${shown}/${list.length}` : String(list.length), title: filtered ? `${shown} of ${list.length} fittings shown` : '' };
   };
   const zScope = activeZone();
-  const scopedFaces = zScope ? F.positiveFaces(job.room, zScope) : null;
+  const scopedFaces = zScope ? F.zoneTouchingFaces(job, zScope) : null;
   const ceilItems = job.items.filter(i => {
     if (i.wall !== C.CEILING) return false;
     if (!zScope) return true;
     return i.fromLeftMm >= zScope.x0 && i.fromLeftMm <= zScope.x1 && i.heightMm >= zScope.y0 && i.heightMm <= zScope.y1;
   });
-  const wallDefs = scopedFaces
-    ? scopedFaces.map(face => ({ v: face.wall, items: job.items.filter(i => F.fittingOnFace(i, face)) }))
-    : ['A', 'B', 'C', 'D'].map(v => ({ v, items: job.items.filter(i => i.wall === v) }));
+  const listed = zScope ? scopedFaces : F.wholeFloorFaces(job);
+  const wallDefs = listed.map(face => ({
+    v: face.view,
+    labelName: face.label,
+    items: job.items.filter(i => F.fittingOnFace(i, face)),
+  }));
   const planItems = scopedFaces
     ? job.items.filter(i => i.wall === C.CEILING ? ceilItems.includes(i) : scopedFaces.some(face => F.fittingOnFace(i, face)))
     : job.items;
@@ -1403,7 +1658,8 @@ function renderTabs() {
   const defs = [{ v: 'PLAN', label: `Plan (${planCount.text})`, title: planCount.title }];
   for (const wall of wallDefs) {
     const c = count(wall.items);
-    defs.push({ v: wall.v, label: `Wall ${wall.v} (${c.text})`, title: c.title });
+    const name = wall.labelName || `Wall ${wall.v}`;
+    defs.push({ v: wall.v, label: `${name} (${c.text})`, title: c.title });
   }
   if (ceilItems.length) defs.push({ v: null, label: `Ceiling fittings: ${count(ceilItems).text} (plan only)`, info: true });
   for (const d of defs) {
@@ -1415,6 +1671,7 @@ function renderTabs() {
     if (d.title) b.title = d.title;
     b.addEventListener('click', () => {
       if (zoneTool && zoneTool.first) zoneTool = { first: null };
+      if (wallTool && wallTool.first) wallTool = { first: null, hover: null };
       view = d.v;
       // a copied downlight can only go on the ceiling in the plan view
       if (copyTpl && copyTpl.type === 'downlight' && view !== 'PLAN' && endCopy()) toast('Stopped placing copies. Downlights can only be copied in the plan view.');
@@ -1422,7 +1679,10 @@ function renderTabs() {
     });
     faces.appendChild(b);
   }
+  if (faces.childElementCount > 5) faces.classList.add('faces-scroll');
   renderZoneNotes(tabs);
+  const activeFace = faces.querySelector('button.active');
+  if (activeFace && PHONE.matches && faces.classList.contains('faces-scroll')) activeFace.scrollIntoView({ inline: 'nearest', block: 'nearest' });
 }
 
 function renderQuote() {
@@ -1574,6 +1834,294 @@ function openZoneSizeForm() {
     { label: 'Add', class: 'btn-primary', testid: 'zone-apply', fn: () => { if (addZoneFromFields(fields)) closeModal(); } },
   ]);
 }
+function englishList(items) {
+  if (!items.length) return '';
+  if (items.length === 1) return items[0];
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+function sideWord(face) {
+  return { N: 'north', E: 'east', S: 'south', W: 'west' }[face] || face;
+}
+function attachmentReport(id) {
+  const fittings = (job.items || []).filter(it => it && it.wall === id).map(it => it.id);
+  const routes = ((job.floor && job.floor.routes) || []).filter(r => r && r.wall === id).map(r => r.id);
+  const sketchFaces = [];
+  for (const key of Object.keys(job.annotations || {})) {
+    const parsed = Walls.parseFaceView(key);
+    if (!parsed || parsed.id !== id) continue;
+    const strokes = job.annotations[key];
+    if (Array.isArray(strokes) && strokes.length) sketchFaces.push(`${sideWord(parsed.face)} side`);
+  }
+  let notes = 0;
+  for (const pin of job.notePins || []) {
+    const parsed = pin && Walls.parseFaceView(pin.view);
+    if (parsed && parsed.id === id) notes += 1;
+  }
+  return { fittings, routes, sketchFaces, notes };
+}
+function wouldStrand(before, next) {
+  const fittings = [];
+  const routes = [];
+  let sketches = 0;
+  let notes = 0;
+  for (const it of job.items || []) {
+    if (!it || it.wall !== before.id) continue;
+    const off = Walls.carriedOffset(before, next, it.face, it.fromLeftMm);
+    if (Walls.attachmentProblem(next, it.face, off, 'fitting')) fittings.push(it.id);
+  }
+  for (const route of (job.floor && job.floor.routes) || []) {
+    if (!route || route.wall !== before.id) continue;
+    const start = Walls.carriedOffset(before, next, route.face, route.startMm);
+    const end = Walls.carriedOffset(before, next, route.face, route.endMm);
+    if (Walls.attachmentProblem(next, route.face, start, 'fitting') || Walls.attachmentProblem(next, route.face, end, 'fitting')) {
+      routes.push(route.id);
+    }
+  }
+  for (const pin of job.notePins || []) {
+    const parsed = pin && Walls.parseFaceView(pin.view);
+    if (!parsed || parsed.id !== before.id) continue;
+    const off = Walls.carriedOffset(before, next, parsed.face, pin.x);
+    if (Walls.attachmentProblem(next, parsed.face, off, 'note')) notes += 1;
+  }
+  for (const key of Object.keys(job.annotations || {})) {
+    const parsed = Walls.parseFaceView(key);
+    if (!parsed || parsed.id !== before.id) continue;
+    const strokes = job.annotations[key];
+    if (!Array.isArray(strokes)) continue;
+    for (const stroke of strokes) {
+      if (!stroke || !Array.isArray(stroke.points)) continue;
+      for (const point of stroke.points) {
+        if (!Array.isArray(point)) continue;
+        const off = Walls.carriedOffset(before, next, parsed.face, point[0]);
+        if (Walls.attachmentProblem(next, parsed.face, off, 'sketch')) sketches += 1;
+      }
+    }
+  }
+  return { fittings, routes, notes, sketches };
+}
+function showWallAttachments(id) {
+  const wall = wallRecord(id);
+  const report = attachmentReport(id);
+  const faces = wall ? Walls.facesFor(wall) : [];
+  let face = faces[0] || null;
+  for (const candidate of faces) {
+    const key = `${id}.${candidate}`;
+    const hasItem = (job.items || []).some(it => it.wall === id && it.face === candidate);
+    const hasSketch = Array.isArray(job.annotations && job.annotations[key]) && job.annotations[key].length;
+    const hasPin = (job.notePins || []).some(pin => pin.view === key);
+    if (hasItem || hasSketch || hasPin) { face = candidate; break; }
+  }
+  if (face) {
+    const key = `${id}.${face}`;
+    if (!scopeFaces().some(item => item.view === key)) zoneId = null;
+    view = key;
+  }
+  highlightIds = report.fittings.slice();
+  selectedId = report.fittings[0] || null;
+  selectedWall = selectedId ? null : id;
+  if (PHONE.matches) inspectorCollapsed = true;
+  renderAll();
+}
+function openRemoveWallDialog(id, report) {
+  const parts = [];
+  if (report.fittings.length) parts.push(`${report.fittings.length} ${report.fittings.length === 1 ? 'fitting' : 'fittings'} (${report.fittings.join(', ')})`);
+  if (report.routes.length) parts.push(`${report.routes.length} ${report.routes.length === 1 ? 'route' : 'routes'} (${report.routes.join(', ')})`);
+  if (report.sketchFaces.length) parts.push(`sketches on its ${englishList(report.sketchFaces)}`);
+  if (report.notes) parts.push(`${report.notes} ${report.notes === 1 ? 'note' : 'notes'}`);
+  modal(`${id} can’t be removed yet`, [el('p', {}, `It still has ${englishList(parts)}. Move or delete them first.`)], [
+    { label: 'Show them', testid: 'wall-show-attachments', fn: () => { closeModal(); showWallAttachments(id); } },
+    { label: 'Close', testid: 'wall-remove-close', fn: () => { closeModal(); renderAll(); } },
+  ]);
+}
+function openShortenDialog(stranded) {
+  renderAll();
+  const bits = [];
+  if (stranded.fittings.length) bits.push(englishList(stranded.fittings));
+  if (stranded.routes.length) bits.push(englishList(stranded.routes.map(routeId => `route ${routeId}`)));
+  if (stranded.notes) bits.push(stranded.notes === 1 ? 'a note' : `${stranded.notes} notes`);
+  if (stranded.sketches) bits.push(stranded.sketches === 1 ? 'a sketch' : `${stranded.sketches} sketches`);
+  modal('Keep the wall longer', [el('p', {}, `This would leave ${englishList(bits)} off the end of the wall. Move them first, or keep the wall longer.`)], [
+    { label: 'Show them', testid: 'wall-show-attachments', fn: () => { closeModal(); if (selectedWall) showWallAttachments(selectedWall); } },
+    { label: 'Close', testid: 'wall-remove-close', fn: () => { closeModal(); renderAll(); } },
+  ]);
+}
+function orderedWall(spec) {
+  const next = { x1: spec.x1, y1: spec.y1, x2: spec.x2, y2: spec.y2 };
+  if (next.x1 > next.x2) { const t = next.x1; next.x1 = next.x2; next.x2 = t; }
+  if (next.y1 > next.y2) { const t = next.y1; next.y1 = next.y2; next.y2 = t; }
+  return next;
+}
+function sameLineMove(before, next) {
+  if (!Walls.sameWallLine(before, next)) {
+    const axis = Walls.wallAxis(before);
+    if (axis === 'H') return Math.abs(next.y1 - before.y1);
+    if (axis === 'V') return Math.abs(next.x1 - before.x1);
+  }
+  return 0;
+}
+function applyWallSpec(id, spec) {
+  const before = wallRecord(id);
+  if (!before) return false;
+  const next = orderedWall(spec);
+  const stranded = wouldStrand(before, { ...before, ...next });
+  if (stranded.fittings.length || stranded.routes.length || stranded.notes || stranded.sketches) {
+    openShortenDialog(stranded);
+    return false;
+  }
+  const shift = sameLineMove(before, next);
+  const fittingCount = (job.items || []).filter(it => it && it.wall === id).length;
+  const routeCount = ((job.floor && job.floor.routes) || []).filter(r => r && r.wall === id).length;
+  const prior = snapshot();
+  const ok = commit(() => { C.replaceWall(job, id, next); }, { exact: true });
+  if (!ok || snapshot() === prior) return false;
+  if (shift) {
+    const moved = [];
+    if (fittingCount) moved.push(`${fittingCount} ${fittingCount === 1 ? 'fitting' : 'fittings'}`);
+    if (routeCount) moved.push(`${routeCount} ${routeCount === 1 ? 'route' : 'routes'}`);
+    const tail = moved.length ? ` Its ${englishList(moved)} moved with it.` : '';
+    toast(`Moved ${id} by ${shift} mm.${tail}`);
+  } else toast(`Updated ${id}.`);
+  return true;
+}
+function wallLengthText(wall) {
+  return `${(Walls.wallLength(wall) / 1000).toFixed(2)} m`;
+}
+function focusWall() {
+  inspectorCollapsed = !!PHONE.matches;
+  renderAll();
+}
+function inspectorWallPanel() {
+  const id = selectedWall;
+  const box = $('#inspector');
+  box.innerHTML = '';
+  const interior = wallRecord(id);
+  const head = el('div', { class: 'inspector-head' });
+  const title = interior ? `${id} · ${wallLengthText(interior)}` : `Wall ${id}`;
+  head.append(el('h2', {}, title), inspectorToggle());
+  box.appendChild(head);
+  if (inspectorCollapsed) return;
+  if (!interior) {
+    box.appendChild(el('p', {}, 'Exterior wall. Change its length in Menu → Floor size.'));
+    const open = el('button', { 'data-testid': 'wall-open-exterior' }, `Open Wall ${id}`);
+    open.addEventListener('click', () => {
+      view = id;
+      if (PHONE.matches) inspectorCollapsed = true;
+      renderAll();
+    });
+    box.appendChild(open);
+    return;
+  }
+  const axis = Walls.wallAxis(interior);
+  const fields = {
+    line: zoneField('Line', 'wall-line', String(axis === 'H' ? interior.y1 : interior.x1), true),
+    start: zoneField('Start', 'wall-start', String(axis === 'H' ? interior.x1 : interior.y1), true),
+    end: zoneField('End', 'wall-end', String(axis === 'H' ? interior.x2 : interior.y2), true),
+  };
+  const labels = axis === 'H'
+    ? [['Line y (mm)', fields.line], ['Start x (mm)', fields.start], ['End x (mm)', fields.end]]
+    : [['Line x (mm)', fields.line], ['Start y (mm)', fields.start], ['End y (mm)', fields.end]];
+  const apply = () => {
+    const line = readWholeMm(fields.line);
+    const start = readWholeMm(fields.start);
+    const end = readWholeMm(fields.end);
+    if (line === null || start === null || end === null) { toast('Enter whole millimetres.'); return; }
+    const spec = axis === 'H' ? { x1: start, y1: line, x2: end, y2: line } : { x1: line, y1: start, x2: line, y2: end };
+    applyWallSpec(id, spec);
+  };
+  for (const [labelText, input] of labels) {
+    box.appendChild(el('label', {}, labelText));
+    box.appendChild(input);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply(); } });
+  }
+  const go = el('button', { class: 'btn-primary', 'data-testid': 'wall-apply' }, 'Apply');
+  go.addEventListener('click', apply);
+  box.appendChild(go);
+  const fittingCount = (job.items || []).filter(it => it && it.wall === id).length;
+  const routeCount = ((job.floor && job.floor.routes) || []).filter(r => r && r.wall === id).length;
+  box.appendChild(el('p', { 'data-testid': 'wall-facts' }, `${wallLengthText(interior)} · ${fittingCount} ${fittingCount === 1 ? 'fitting' : 'fittings'} · ${routeCount} ${routeCount === 1 ? 'route' : 'routes'}`));
+  for (const face of Walls.facesFor(interior)) {
+    const open = el('button', { 'data-testid': `wall-open-${face}` }, `Open ${sideWord(face)} side`);
+    open.addEventListener('click', () => {
+      const key = `${id}.${face}`;
+      if (!scopeFaces().some(item => item.view === key)) {
+        zoneId = null;
+        toast('Whole floor is open so you can see that side.');
+      }
+      view = key;
+      if (PHONE.matches) inspectorCollapsed = true;
+      renderAll();
+    });
+    box.appendChild(open);
+  }
+  const remove = el('button', { class: 'btn-danger', 'data-testid': 'wall-remove' }, 'Remove wall');
+  remove.addEventListener('click', () => {
+    const report = attachmentReport(id);
+    if (report.fittings.length || report.routes.length || report.sketchFaces.length || report.notes) {
+      openRemoveWallDialog(id, report);
+      return;
+    }
+    const prior = snapshot();
+    commit(() => { C.removeWall(job, id); }, { exact: true });
+    if (snapshot() === prior) return;
+    selectedWall = null;
+    if (view.startsWith(id + '.')) view = 'PLAN';
+    toast(`Removed ${id}. Undo brings it back.`);
+    renderAll();
+  });
+  box.appendChild(remove);
+}
+function openWallSizeForm() {
+  const box = el('div');
+  const axis = el('select', { 'data-testid': 'wall-axis' });
+  axis.append(el('option', { value: 'horizontal' }, 'Horizontal'), el('option', { value: 'vertical' }, 'Vertical'));
+  const fields = {
+    line: zoneField('Line', 'wall-line', '', true),
+    start: zoneField('Start', 'wall-start', '', true),
+    end: zoneField('End', 'wall-end', '', true),
+  };
+  const lineLabel = el('label', {}, 'Line y (mm)');
+  const startLabel = el('label', {}, 'Start x (mm)');
+  const endLabel = el('label', {}, 'End x (mm)');
+  const syncLabels = () => {
+    const horizontal = axis.value === 'horizontal';
+    lineLabel.textContent = horizontal ? 'Line y (mm)' : 'Line x (mm)';
+    startLabel.textContent = horizontal ? 'Start x (mm)' : 'Start y (mm)';
+    endLabel.textContent = horizontal ? 'End x (mm)' : 'End y (mm)';
+  };
+  axis.addEventListener('change', syncLabels);
+  box.append(el('label', {}, 'Direction'), axis, lineLabel, fields.line, startLabel, fields.start, endLabel, fields.end);
+  const add = () => {
+    const line = readWholeMm(fields.line);
+    const start = readWholeMm(fields.start);
+    const end = readWholeMm(fields.end);
+    if (line === null || start === null || end === null) { toast('Enter whole millimetres.'); return false; }
+    const spec = axis.value === 'horizontal'
+      ? orderedWall({ x1: start, y1: line, x2: end, y2: line })
+      : orderedWall({ x1: line, y1: start, x2: line, y2: end });
+    let id = null;
+    commit(() => { id = C.addWall(job, spec); }, { exact: true });
+    if (!id || !wallRecord(id)) return false;
+    selectedWall = id;
+    selectedId = null;
+    wallTool = { first: null, hover: null };
+    const made = wallRecord(id);
+    toast(`Added ${id}, ${wallLengthText(made)} long. Undo removes it.`);
+    focusWall();
+    return true;
+  };
+  for (const input of [fields.line, fields.start, fields.end]) {
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      if (add()) closeModal();
+    });
+  }
+  modal('Wall size', [box], [
+    { label: 'Cancel', fn: closeModal },
+    { label: 'Add', class: 'btn-primary', testid: 'wall-add', fn: () => { if (add()) closeModal(); } },
+  ]);
+}
 function inspectorZonePanel() {
   const z = activeZone();
   const box = $('#inspector');
@@ -1603,8 +2151,8 @@ function inspectorZonePanel() {
     `Facts: ${facts.faces} wall ${facts.faces === 1 ? 'face' : 'faces'}, ${facts.bareEdges} ${facts.bareEdges === 1 ? 'edge' : 'edges'} without a wall, ${facts.fittings} ${facts.fittings === 1 ? 'fitting' : 'fittings'}`));
   const showWalls = el('button', { 'data-testid': 'zone-show-walls' }, 'Show its walls');
   showWalls.addEventListener('click', () => {
-    const first = F.positiveFaces(job.room, z)[0];
-    view = first ? first.wall : 'PLAN';
+    const first = F.zoneTouchingFaces(job, z)[0];
+    view = first ? first.view : 'PLAN';
     if (PHONE.matches) inspectorCollapsed = true;
     renderAll();
   });
@@ -1777,6 +2325,7 @@ function renderInspector() {
   if (multiIds) { inspectorMultiPanel(); return; }
   const item = job.items.find(i => i.id === selectedId);
   if (!item) {
+    if (selectedWall) { inspectorWallPanel(); return; }
     if (activeZone()) { inspectorZonePanel(); return; }
     inspectorRoomPanel();
     return;
@@ -1830,11 +2379,33 @@ function renderInspector() {
     wallSel.appendChild(el('option', { value: C.CEILING }, 'Ceiling'));
   } else {
     for (const w of C.WALLS) wallSel.appendChild(el('option', { value: w }, `Wall ${w}`));
+    for (const face of F.wholeFloorFaces(job)) {
+      if (!face.interior) continue;
+      wallSel.appendChild(el('option', { value: face.view }, face.sideLabel));
+    }
   }
-  wallSel.value = item.wall;
+  wallSel.value = Walls.isWallId(item.wall) && item.face ? `${item.wall}.${item.face}` : item.wall;
   label('Wall');
   box.appendChild(wallSel);
-  wallSel.addEventListener('change', () => commit(() => { item.wall = wallSel.value; C.clampItem(job, item); }));
+  wallSel.addEventListener('change', () => commit(() => {
+    const parsed = Walls.parseFaceView(wallSel.value);
+    if (item.type === 'downlight') {
+      item.wall = C.CEILING;
+      delete item.face;
+      return;
+    }
+    if (parsed) {
+      const wall = wallRecord(parsed.id);
+      const err = Walls.placementError(wall, item.fromLeftMm, item.heightMm, parsed.face, C.ceilingHeightMm(job.room));
+      if (err) throw new Error(err);
+      item.wall = parsed.id;
+      item.face = parsed.face;
+      return;
+    }
+    item.wall = wallSel.value;
+    delete item.face;
+    C.clampItem(job, item);
+  }, { exact: true }));
 
   const mkNum = (idAttr, text, key) => {
     label(text);
@@ -1970,17 +2541,20 @@ function renderAll() {
   // drawing mid-gesture and the drag would land far from the finger. The lift's
   // renderAll unfolds it instead.
   const zNow = activeZone();
-  if (zNow && view !== 'PLAN' && !F.positiveFaces(job.room, zNow).some(face => face.wall === view)) view = 'PLAN';
-  if (!dragFitting && !zoneEdgeDrag && !panning) {
+  if (selectedWall && !wallRecord(selectedWall) && !C.WALLS.includes(selectedWall)) selectedWall = null;
+  if (view !== 'PLAN' && !scopeFaces().some(face => face.view === view)) view = 'PLAN';
+  if (!dragFitting && !zoneEdgeDrag && !wallDrag && !panning) {
     if (selectedId && selectedId !== lastDetailsId && mode === 'select' && !PHONE.matches && !multiIds) inspectorCollapsed = false;
-    if (!selectedId && zoneId && zoneId !== lastZoneDetails && !PHONE.matches && !multiIds) inspectorCollapsed = false;
+    if (!selectedId && selectedWall && selectedWall !== lastWallDetails && mode === 'select' && !PHONE.matches && !multiIds) inspectorCollapsed = false;
+    if (!selectedId && !selectedWall && zoneId && zoneId !== lastZoneDetails && !PHONE.matches && !multiIds) inspectorCollapsed = false;
     lastDetailsId = selectedId;
     lastZoneDetails = zoneId;
+    lastWallDetails = selectedWall;
   }
   // A rebuild of the same panel (a save, a layer change) keeps the reader's
   // scroll position; a different panel starts at the top.
   const insBox = $('#inspector');
-  const insKey = `${currentId}|${selectedId}|${zoneId || ''}|${multiIds ? 'multi' : ''}|${inspectorCollapsed}`;
+  const insKey = `${currentId}|${selectedId}|${selectedWall || ''}|${zoneId || ''}|${multiIds ? 'multi' : ''}|${inspectorCollapsed}`;
   const keepTop = insKey === lastInspectorKey ? insBox.scrollTop : 0;
   lastInspectorKey = insKey;
   renderTabs(); renderLayers(); renderCanvas(); renderInspector(); renderQuote();
@@ -2042,8 +2616,17 @@ function openRoomForm() {
         if (zoneBlock) { errP.hidden = false; errP.textContent = zoneBlock; return; }
         const outside = C.itemsOutside(job, vals.widthM, vals.depthM, vals.heightM);
         if (outside.length) { closeModal(); askShrink(vals, outside); return; }
-        commit(() => { job.room = vals; });
+        const oldSpan = roomMm();
+        const wallsBefore = interiorWalls().map(w => ({ ...w }));
+        const ok = commit(() => { job.room = vals; });
         closeModal();
+        if (!ok) return;
+        const nextSpan = roomMm();
+        if (nextSpan.W > oldSpan.W || nextSpan.D > oldSpan.D) {
+          const left = wallsBefore.filter(w => reachesOutside(w, oldSpan.W, oldSpan.D) && !reachesOutside(w, nextSpan.W, nextSpan.D)).map(w => w.id);
+          if (left.length === 1) toast(`${left[0]} no longer reaches the outside wall.`);
+          else if (left.length) toast(`${englishList(left)} no longer reach the outside wall.`);
+        }
       },
     },
   ], isEdited, 'You have edited the room size.');
@@ -3014,6 +3597,7 @@ function explainWideTouch(width) {
 function cancelInteraction() {
   const drag = dragFitting;
   pinch = null; drawingStroke = null; panning = null; dragFitting = null; owner = null; zoneGesture = null; zoneEdgeDrag = null;
+  wallGesture = null; wallDrag = null;
   multiPending = null; // a cancelled or pinched tap never toggles
   if (drag) { job = C.normaliseJob(JSON.parse(drag.pre)); renderAll(); }
   else renderCanvas();
@@ -3123,6 +3707,10 @@ function grabOffsetFor(id, p) {
   if (!it) return { dL: 0, dH: 0 };
   if (view === 'PLAN') {
     if (it.wall === C.CEILING) return { dL: p.x - it.fromLeftMm, dH: p.y - it.heightMm };
+    if (Walls.isWallId(it.wall)) {
+      const at = planPos(it);
+      return { dL: p.x - at.x, dH: p.y - at.y };
+    }
     const wp = wallParamsFromPlan(p.x, p.y, it.wall);
     return wp ? { dL: wp.fromLeft - it.fromLeftMm, dH: 0 } : { dL: 0, dH: 0 };
   }
@@ -3176,6 +3764,12 @@ $('#canvas').addEventListener('pointerdown', (e) => {
   const hitFitting = hits.length ? hits[0] : null;
   if (fingerOnly && (mode !== 'select' || hitFitting)) explainFingerPan();
 
+  if (mode === 'build' && !fingerOnly && view === 'PLAN' && wallTool) {
+    wallGesture = { id: e.pointerId, sx: e.clientX, sy: e.clientY, p };
+    owner = e.pointerId;
+    noteInput(e, 'wall');
+    return;
+  }
   if (mode === 'build' && !fingerOnly && view === 'PLAN' && zoneTool) {
     zoneGesture = { id: e.pointerId, sx: e.clientX, sy: e.clientY, p };
     owner = e.pointerId;
@@ -3198,6 +3792,7 @@ $('#canvas').addEventListener('pointerdown', (e) => {
       // a dense spot selects nothing yet unless one of its fittings was already
       // chosen — the chooser on lift names the fitting
       selectedId = res.id;
+      if (res.id) selectedWall = null;
       // A tap-select arms a drag but nothing moves until the pointer travels
       // TAP_SLOP_PX: a small wobble selects without nudging the fitting. The
       // grab offset keeps the fitting where the finger took hold of it. A drag
@@ -3210,9 +3805,48 @@ $('#canvas').addEventListener('pointerdown', (e) => {
         cands: res.cands,
       };
     } else {
+      const wallHandle = view === 'PLAN' && e.target.closest && e.target.closest('.wall-handle');
+      if (wallHandle) {
+        if (controlCovers(wallHandle)) {
+          zoom = { s: 1, tx: 0, ty: 0 };
+          renderAll();
+          noteInput(e, 'fit');
+          return;
+        }
+        const which = wallHandle.getAttribute('data-which');
+        const wid = wallHandle.getAttribute('data-wall');
+        const rec = wallRecord(wid);
+        wallDrag = rec ? {
+          id: e.pointerId, which, wallId: wid,
+          sx: e.clientX, sy: e.clientY,
+          origin: { id: rec.id, x1: rec.x1, y1: rec.y1, x2: rec.x2, y2: rec.y2 },
+          live: null,
+        } : null;
+        selectedWall = wid;
+        selectedId = null;
+        owner = e.pointerId;
+        noteInput(e, 'wall-handle');
+        return;
+      }
+      const wallHit = view === 'PLAN' && e.target.closest && e.target.closest('.wall-hit');
+      if (wallHit) {
+        selectedWall = wallHit.getAttribute('data-wall');
+        selectedId = null;
+        highlightIds = null;
+        owner = e.pointerId;
+        noteInput(e, 'wall');
+        renderAll();
+        return;
+      }
       const handle = e.target.closest && e.target.closest('.zone-handle');
       const edge = handle && zoneId ? handle.getAttribute('data-edge') : null;
       if (edge) {
+        if (handle && controlCovers(handle)) {
+          zoom = { s: 1, tx: 0, ty: 0 };
+          renderAll();
+          noteInput(e, 'fit');
+          return;
+        }
         const z = F.zoneById(job, zoneId);
         zoneEdgeDrag = z ? {
           id: e.pointerId, edge, zoneId, sx: e.clientX, sy: e.clientY,
@@ -3275,7 +3909,7 @@ function placeAt(p) {
   const dims = roomMm();
   const tpl = copyTpl;
   const type = tpl ? tpl.type : placeType;
-  let wall, fromLeft, height;
+  let wall, fromLeft, height, face;
   if (type === 'downlight') {
     if (view !== 'PLAN') {
       if (endCopy()) { toast('Stopped placing copies. Downlights can only be copied in the plan view.'); renderAll(); return; }
@@ -3287,23 +3921,34 @@ function placeAt(p) {
     height = Math.max(0, Math.min(dims.D, Math.round(p.y)));
   } else if (view !== 'PLAN') {
     // a copy keeps its captured height in every view; the tap gives only the distance from the left
-    wall = view;
-    fromLeft = Math.max(0, Math.min(Math.round(p.x), C.wallLengthMm(job.room, view)));
+    const parsed = Walls.parseFaceView(view);
+    let maxL;
+    if (parsed) {
+      wall = parsed.id;
+      face = parsed.face;
+      const rec = wallRecord(parsed.id);
+      maxL = rec ? Walls.wallLength(rec) : 0;
+    } else {
+      wall = view;
+      maxL = C.wallLengthMm(job.room, view);
+    }
+    fromLeft = Math.max(0, Math.min(Math.round(p.x), maxL));
     height = tpl ? tpl.heightMm : Math.max(0, Math.min(dims.H - Math.round(p.y), dims.H));
   } else {
-    wall = nearestWallFromPlan(p.x, p.y);
-    const wp = wallParamsFromPlan(p.x, p.y, wall);
-    if (!wp) {
+    const hit = nearestFaceFromPlan(p.x, p.y);
+    if (!hit) {
       toast('That’s in the open floor. Tap close to a wall, or open that wall’s view and tap there.');
       return;
     }
-    const maxL = C.wallLengthMm(job.room, wall);
-    fromLeft = Math.max(0, Math.min(wp.fromLeft, maxL)); // clamp taps beyond the wall ends
+    wall = hit.wall;
+    face = hit.face || undefined;
+    const maxL = Walls.isWallId(wall) ? Walls.wallLength(wallRecord(wall)) : C.wallLengthMm(job.room, wall);
+    fromLeft = Math.max(0, Math.min(hit.fromLeft, maxL));
     height = tpl ? tpl.heightMm : (jobPrefs.heights[type] ?? C.TYPES[type].defaultHeightMm ?? 450);
   }
   fromLeft = Math.max(0, fromLeft);
   if (zoneId && wall !== C.CEILING) {
-    const clip = zoneFaceFor(wall);
+    const clip = F.zoneTouchingFaces(job, activeZone()).find(f => f.wall === wall && (face ? f.face === face : !f.interior));
     if (!clip || fromLeft < clip.fromMm || fromLeft > clip.toMm) {
       toast('Place inside the part of the wall that belongs to this zone.');
       return;
@@ -3318,17 +3963,24 @@ function placeAt(p) {
   let id, revealed = null;
   // Placing onto a hidden layer shows that layer, so the new fitting never vanishes.
   commit(() => {
-    id = tpl ? C.placeLike(job, { type, layer: tpl.layer }, wall, fromLeft, height) : C.placeItem(job, type, wall, fromLeft, height);
+    id = tpl
+      ? C.placeLike(job, { type, layer: tpl.layer }, wall, fromLeft, height, face)
+      : C.placeItem(job, type, wall, fromLeft, height, '', face);
     revealed = revealLayerOf(id);
   });
   if (!id) return; // commit failed (e.g. item cap); job untouched
   rememberHeight(type, wall, height);
   selectedId = id;
-  toast(`${id} placed on ${wall === C.CEILING ? 'ceiling' : 'Wall ' + wall}${revealed ? ` · ${revealed} layer now shown` : ''}${clampNote}`);
+  const placedOn = wall === C.CEILING ? 'ceiling' : (face ? `${wall} ${sideWord(face)} side` : 'Wall ' + wall);
+  toast(`${id} placed on ${placedOn}${revealed ? ` · ${revealed} layer now shown` : ''}${clampNote}`);
   renderAll();
 }
 
 $('#canvas').addEventListener('pointermove', (e) => {
+  if (wallTool && wallTool.first && mode === 'build' && view === 'PLAN' && !pointers.has(e.pointerId)) {
+    const hover = svgPoint(e);
+    if (hover) { wallTool.hover = hover; renderCanvas(); }
+  }
   if (e.pointerType === 'pen') lastPenAt = performance.now(); // includes hover
   if (e.pointerId === lastDown.id && !lastDown.end) lastDown.moves += 1;
   if (!pointers.has(e.pointerId)) return;
@@ -3365,6 +4017,15 @@ $('#canvas').addEventListener('pointermove', (e) => {
         const dims = roomMm();
         newL = Math.max(0, Math.min(dims.W, Math.round(t.x)));
         newH = Math.max(0, Math.min(dims.D, Math.round(t.y)));
+      } else if (Walls.isWallId(item.wall)) {
+        const rec = wallRecord(item.wall);
+        const off = rec ? Walls.offsetFromPlan(rec, item.face, t) : null;
+        if (off !== null) {
+          const maxL = C.maxFromLeft(job, item);
+          let next = Math.round(off);
+          if (next < 0 || next > maxL) { next = Math.max(0, Math.min(maxL, next)); changedToClamp = true; }
+          newL = next;
+        }
       } else {
         // slide along the item's own wall only
         const wp = wallParamsFromPlan(t.x, t.y, item.wall);
@@ -3400,6 +4061,16 @@ $('#canvas').addEventListener('pointermove', (e) => {
     }
     return;
   }
+  if (wallDrag && wallDrag.id === e.pointerId) {
+    const drag = wallDrag;
+    if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < TAP_SLOP_PX) return;
+    const axis = Walls.wallAxis(drag.origin);
+    const guides = axis === 'H' ? planGuides().x : planGuides().y;
+    const raw = axis === 'H' ? p.x : p.y;
+    drag.live = wallFromHandle(drag.origin, drag.which, F.snapNearest(raw, screenMm(12), guides));
+    renderCanvas();
+    return;
+  }
   if (zoneEdgeDrag && zoneEdgeDrag.id === e.pointerId) {
     const drag = zoneEdgeDrag;
     const moved = Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) >= TAP_SLOP_PX;
@@ -3426,11 +4097,29 @@ function endPointer(e) {
   if (pointers.size < 2) pinch = null;
   if (e.pointerId !== owner) return;
   owner = null;
+  if (wallGesture && wallGesture.id === e.pointerId) {
+    const g = wallGesture;
+    wallGesture = null;
+    panning = null;
+    if (Math.hypot(e.clientX - g.sx, e.clientY - g.sy) < TAP_SLOP_PX) finishWallTap(g.p);
+    return;
+  }
   if (zoneGesture && zoneGesture.id === e.pointerId) {
     const g = zoneGesture;
     zoneGesture = null;
     panning = null;
     if (Math.hypot(e.clientX - g.sx, e.clientY - g.sy) < TAP_SLOP_PX) finishZoneTap(g.p);
+    return;
+  }
+  if (wallDrag && wallDrag.id === e.pointerId) {
+    const drag = wallDrag;
+    wallDrag = null;
+    const moved = Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) >= TAP_SLOP_PX;
+    if (!moved || !drag.live) { renderCanvas(); return; }
+    const same = drag.live.x1 === drag.origin.x1 && drag.live.y1 === drag.origin.y1
+      && drag.live.x2 === drag.origin.x2 && drag.live.y2 === drag.origin.y2;
+    if (!same) applyWallSpec(drag.wallId, drag.live);
+    else renderAll();
     return;
   }
   if (zoneEdgeDrag && zoneEdgeDrag.id === e.pointerId) {
@@ -3441,7 +4130,7 @@ function endPointer(e) {
     const { W, D } = roomMm();
     const vertical = drag.edge === 'n' || drag.edge === 's';
     const rawValue = drag.edge === 'n' ? drag.live.y0 : drag.edge === 's' ? drag.live.y1 : drag.edge === 'w' ? drag.live.x0 : drag.live.x1;
-    const snapped = F.snapToGuides(rawValue, screenMm(12), vertical ? [0, D] : [0, W]);
+    const snapped = F.snapNearest(rawValue, screenMm(12), vertical ? planGuides().y : planGuides().x);
     const next = boundsForEdge(drag.origin, drag.edge, snapped);
     if (next.x0 === drag.origin.x0 && next.y0 === drag.origin.y0 && next.x1 === drag.origin.x1 && next.y1 === drag.origin.y1) {
       renderCanvas();
@@ -3486,6 +4175,17 @@ function endPointer(e) {
       return;
     }
     if (dragFitting.moved) {
+      const dragged = job.items.find(i => i.id === dragFitting.id);
+      if (dragged && zoneId && dragged.wall !== C.CEILING) {
+        const clip = F.zoneTouchingFaces(job, activeZone()).find(f => f.wall === dragged.wall && (dragged.face ? f.face === dragged.face : !f.interior));
+        if (!clip || dragged.fromLeftMm < clip.fromMm || dragged.fromLeftMm > clip.toMm) {
+          job = JSON.parse(dragFitting.pre);
+          dragFitting = null;
+          toast('Place inside the part of the wall that belongs to this zone.');
+          renderAll();
+          return;
+        }
+      }
       // one history entry for the whole drag (snapshot taken before it started)
       history.push(dragFitting.pre);
       if (history.length > C.LIMITS.historyLimit) history.shift();
@@ -3510,9 +4210,12 @@ function endPointer(e) {
       if (pan.pendingZone) {
         if (selectedId && !selectionVisible(selectedId, pan.pendingZone)) selectedId = null;
         zoneId = pan.pendingZone;
+        selectedWall = null;
+        highlightIds = null;
         if (PHONE.matches) inspectorCollapsed = true;
       } else if (pan.pendingClear) {
         selectedId = null;
+        if (view === 'PLAN') { selectedWall = null; highlightIds = null; }
       }
       renderAll();
       return;
@@ -3560,15 +4263,87 @@ $('#canvas').addEventListener('wheel', (e) => {
 const MODES = ['select', 'place', 'draw', 'notes', 'build'];
 function screenMm(px) {
   const svg = $('#canvas');
+  const matrix = $('#world')?.getScreenCTM();
+  const scale = matrix && Math.hypot(matrix.a, matrix.b);
+  if (scale > 0) return px / scale;
   const rect = svg.getBoundingClientRect();
   const vb = svg.viewBox && svg.viewBox.baseVal;
-  if (!rect.width || !vb || !vb.width || !zoom.s) return 50;
-  return px * (vb.width / rect.width) / zoom.s;
+  if (!rect.width || !rect.height || !vb?.width || !vb.height || !zoom.s) return 50;
+  return px / (Math.min(rect.width / vb.width, rect.height / vb.height) * zoom.s);
+}
+function planGuides() {
+  const { W, D } = roomMm();
+  const x = [0, W];
+  const y = [0, D];
+  for (const wall of interiorWalls()) {
+    x.push(wall.x1, wall.x2);
+    y.push(wall.y1, wall.y2);
+  }
+  return { x, y };
 }
 function snapPlan(p) {
-  const { W, D } = roomMm();
   const tol = screenMm(12);
-  return { x: F.snapToGuides(p.x, tol, [0, W]), y: F.snapToGuides(p.y, tol, [0, D]) };
+  const guides = planGuides();
+  return { x: F.snapNearest(p.x, tol, guides.x), y: F.snapNearest(p.y, tol, guides.y) };
+}
+function lockedWall(a, b) {
+  const dx = Math.abs(b.x - a.x);
+  const dy = Math.abs(b.y - a.y);
+  if (dx >= dy) return orderedWall({ x1: a.x, y1: a.y, x2: b.x, y2: a.y });
+  return orderedWall({ x1: a.x, y1: a.y, x2: a.x, y2: b.y });
+}
+function wallFromHandle(origin, which, value) {
+  const next = { x1: origin.x1, y1: origin.y1, x2: origin.x2, y2: origin.y2 };
+  const horizontal = origin.y1 === origin.y2;
+  const snapped = Math.round(value);
+  if (horizontal) {
+    if (which === 'start') next.x1 = snapped;
+    else next.x2 = snapped;
+  } else if (which === 'start') next.y1 = snapped;
+  else next.y2 = snapped;
+  return orderedWall(next);
+}
+function wallPreviewHint() {
+  if (!wallTool || !wallTool.first || !wallTool.hover || !job || !job.floor) return '';
+  const aim = lockedWall(wallTool.first, snapPlan(wallTool.hover));
+  const length = Math.abs(aim.x2 - aim.x1) + Math.abs(aim.y2 - aim.y1);
+  return `W${job.floor.nextWallNo} · ${(length / 1000).toFixed(2)} m`;
+}
+function finishWallTap(p) {
+  if (!wallTool || view !== 'PLAN' || !job.floor) return;
+  const snapped = snapPlan(p);
+  if (!wallTool.first) {
+    wallTool = { first: snapped, hover: null };
+    if (PHONE.matches) inspectorCollapsed = true;
+    renderAll();
+    return;
+  }
+  const spec = lockedWall(wallTool.first, snapped);
+  let id = null;
+  commit(() => { id = C.addWall(job, spec); }, { exact: true });
+  wallTool = { first: null, hover: null };
+  if (id && wallRecord(id)) {
+    selectedWall = id;
+    selectedId = null;
+    const made = wallRecord(id);
+    toast(`Added ${id}, ${wallLengthText(made)} long. Undo removes it.`);
+    focusWall();
+  } else renderCanvas();
+}
+function reachesOutside(wall, widthMm, depthMm) {
+  if (!wall) return false;
+  if (wall.y1 === wall.y2 && (wall.y1 === 0 || wall.y1 === depthMm)) return true;
+  if (wall.x1 === wall.x2 && (wall.x1 === 0 || wall.x1 === widthMm)) return true;
+  return wall.x1 === 0 || wall.x2 === widthMm || wall.y1 === 0 || wall.y2 === depthMm;
+}
+function controlCovers(node) {
+  if (!node || !node.getBoundingClientRect) return false;
+  const r = node.getBoundingClientRect();
+  const cx = r.left + r.width / 2;
+  const cy = r.top + r.height / 2;
+  const hit = document.elementFromPoint(cx, cy);
+  if (!hit) return false;
+  return hit !== node && !node.contains(hit);
 }
 function finishZoneTap(p) {
   if (!zoneTool || view !== 'PLAN' || !job.floor) return;
@@ -3603,8 +4378,11 @@ function setMode(m) {
   const leftMulti = m !== 'select' && !!multiIds;
   if (leftMulti) endMulti(); // another tool leaves multi mode with no change
   if (m !== 'place') endCopy(); // so does copy mode
-  if (m !== mode) zoneTool = m === 'build' ? zoneTool : null;
-  if (m !== 'build') zoneTool = null;
+  if (m !== mode) {
+    zoneTool = m === 'build' ? zoneTool : null;
+    wallTool = m === 'build' ? wallTool : null;
+  }
+  if (m !== 'build') { zoneTool = null; wallTool = null; }
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   $('#place-palette').hidden = m !== 'place' && m !== 'build';
@@ -3618,19 +4396,28 @@ function buildPalette() {
   const pal = $('#place-palette');
   pal.innerHTML = '';
   if (mode === 'build') {
-    pal.appendChild(el('p', { class: 'palette-title' }, 'Zones'));
+    pal.appendChild(el('p', { class: 'palette-title' }, 'Build'));
+    const addWall = el('button', { class: 'pal-btn' + (wallTool ? ' active' : ''), 'data-testid': 'build-add-wall' }, 'Add wall');
+    addWall.addEventListener('click', () => {
+      view = 'PLAN';
+      wallTool = { first: null, hover: null };
+      zoneTool = null;
+      buildPalette();
+      renderCanvas();
+    });
     const add = el('button', { class: 'pal-btn' + (zoneTool ? ' active' : ''), 'data-testid': 'build-add-zone' }, 'Add zone');
     add.addEventListener('click', () => {
       view = 'PLAN';
       zoneTool = { first: null };
+      wallTool = null;
       buildPalette();
       renderCanvas();
     });
     const sizes = el('button', { class: 'pal-btn', 'data-testid': 'build-enter-sizes' }, 'Enter sizes…');
-    sizes.addEventListener('click', openZoneSizeForm);
-    const cancel = el('button', { class: 'pal-btn' }, 'Cancel');
-    cancel.addEventListener('click', () => { zoneTool = null; buildPalette(); renderCanvas(); });
-    pal.append(add, sizes, cancel);
+    sizes.addEventListener('click', () => { if (wallTool) openWallSizeForm(); else openZoneSizeForm(); });
+    const cancel = el('button', { class: 'pal-btn', 'data-testid': 'build-cancel' }, 'Cancel');
+    cancel.addEventListener('click', () => { zoneTool = null; wallTool = null; buildPalette(); renderCanvas(); });
+    pal.append(addWall, add, sizes, cancel);
     return;
   }
   if (copyTpl) {
@@ -3746,7 +4533,11 @@ document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
   else if ((e.ctrlKey && e.key.toLowerCase() === 'y') || (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'z')) { e.preventDefault(); redo(); }
   else if (e.key === 'Delete' && selectedId) { commit(() => { job.items = job.items.filter(i => i.id !== selectedId); }); toast(`${selectedId} deleted · Undo`); selectedId = null; renderAll(); }
-  else if (e.key === 'Escape' && zoneTool && zoneTool.first) { zoneTool = { first: null }; renderCanvas(); }
+  else if (e.key === 'Escape' && ((zoneTool && zoneTool.first) || (wallTool && wallTool.first))) {
+    if (zoneTool) zoneTool = { first: null };
+    if (wallTool) wallTool = { first: null, hover: null };
+    renderCanvas();
+  }
   else if (e.key === 'Escape' && copyTpl) cancelCopy(); // leaves copy mode with nothing added
   else if (e.key === 'Escape') {
     if (PHONE.matches) inspectorCollapsed = true;

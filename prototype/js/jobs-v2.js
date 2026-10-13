@@ -9,7 +9,7 @@ import {
 } from './jobs.js';
 
 export { cleanPrefs, MAX_JOBS, MAX_RESCUES, MAX_ARCHIVE_BYTES, LEGACY_KEY, ARCHIVE_SCHEMA };
-export const BUILD = 'surface-proto-v13-floor-zones-20261012';
+export const BUILD = 'surface-proto-v14-floor-walls-20261013';
 export const JOB_PREFIX = 'surface.jobs.v2.job.';
 
 const PREFIX = 'surface.jobs.v2.';
