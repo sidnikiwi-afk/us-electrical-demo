@@ -1,0 +1,134 @@
+/* Design preview styling. Follows the live prototype: large controls, navy bar, drawing first. */
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; font: 16px/1.4 system-ui, sans-serif; color: #1a1a1a; }
+button, select { font: inherit; color: inherit; min-height: 44px; border-radius: 8px; border: 1px solid #8a8f98; background: #fff; cursor: pointer; padding: 4px 12px; }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible { outline: 3px solid #1d5fa8; outline-offset: 2px; }
+[hidden] { display: none !important; }
+.spacer { flex: 1; }
+
+#app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+#topbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 56px; padding: 6px 10px; background: #23324d; color: #fff; }
+#topbar button { background: #33507e; color: #fff; border-color: #5a77a6; flex-shrink: 0; }
+.preview-label { background: #6a4fa3; padding: 4px 10px; border-radius: 6px; font-weight: 700; font-size: 14px; white-space: nowrap; }
+.topbar-note { font-size: 13px; color: #d9e2f2; min-width: 0; }
+
+#main { flex: 1; display: flex; min-height: 0; position: relative; }
+#centre { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+#viewbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px; background: #e8ecf3; border-bottom: 1px solid #c4ccd8; }
+.seg { display: inline-flex; }
+.seg button { border-radius: 0; }
+.seg button:first-child { border-radius: 8px 0 0 8px; }
+.seg button:last-child { border-radius: 0 8px 8px 0; border-left: 0; }
+.seg button[aria-pressed="true"], #wall-tabs button[aria-pressed="true"] { background: #23324d; color: #fff; border-color: #23324d; }
+.zone-pick { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; min-width: 0; }
+.zone-pick select { min-width: 0; max-width: 100%; }
+#wall-tabs { display: flex; gap: 6px; flex: 1 1 100%; min-width: 0; overflow-x: auto; padding-bottom: 2px; }
+#wall-tabs button { flex: 0 0 auto; white-space: nowrap; font-size: 14px; }
+#wall-tabs button.current { border: 2px solid #23324d; }
+.wall-gap { flex: 0 0 auto; align-self: center; font-size: 13px; color: #555; border: 1px dashed #999; border-radius: 8px; padding: 6px 8px; white-space: nowrap; }
+
+#canvas-wrap { flex: 1; display: flex; flex-direction: column; min-height: 0; position: relative; background: #fbfaf7; }
+/* Fixed-height caption: one title line and two hint lines, whatever the message.
+   If its height followed the text, the plan would move between the two taps of Draw a wall. */
+.caption { display: flex; flex-direction: column; flex: 0 0 auto; padding: 6px 10px 0; }
+#view-title { margin: 0; font-size: 17px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#hint { margin: 0; font-size: 14px; line-height: 1.35; color: #444; height: 2.7em; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+#drawing { flex: 1; width: 100%; min-height: 0; display: block; touch-action: manipulation; user-select: none; -webkit-user-select: none; }
+#drawing.drawing-wall { cursor: crosshair; }
+#drawing .zone-label { pointer-events: none; }
+
+.legend { font-size: 13px; }
+#legend-float { position: absolute; left: 8px; bottom: 8px; z-index: 3; background: rgba(255,255,255,.96); border: 1px solid #aaa; border-radius: 8px; max-width: min(300px, calc(100% - 16px)); max-height: 60%; overflow: auto; }
+#legend-float summary { min-height: 40px; display: flex; align-items: center; padding: 0 12px; cursor: pointer; font-weight: 600; }
+#legend-float .legend-body { padding: 0 10px 8px; }
+body:not(.panel-closed) #legend-float { display: none; }
+.legend-body ul { list-style: none; margin: 0; padding: 0; }
+.legend-body li { display: flex; align-items: center; gap: 8px; min-height: 26px; }
+.legend-body h3 { font-size: 13px; margin: 8px 0 2px; color: #444; }
+.legend-body svg { flex: 0 0 auto; }
+
+#panel { width: 330px; flex: 0 0 330px; border-left: 1px solid #c4ccd8; background: #fff; overflow-y: auto; padding: 8px 12px 16px; }
+body.panel-closed #panel { display: none; }
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.panel-title { font-weight: 700; color: #444; }
+#panel section { border-top: 1px solid #e1e5eb; padding: 8px 0 12px; }
+#panel h2 { font-size: 16px; margin: 4px 0 6px; }
+#panel section > button { display: block; width: 100%; margin: 6px 0; text-align: left; }
+.zone-id { font-size: 13px; font-weight: 600; color: #555; border: 1px solid #aaa; border-radius: 4px; padding: 0 5px; margin-left: 4px; }
+.zone-swatch { display: inline-block; width: 14px; height: 14px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; }
+.facts { margin: 6px 0 0; padding-left: 18px; font-size: 14px; }
+.explain { border-top: 1px solid #e1e5eb; padding: 6px 0; font-size: 14px; }
+.explain summary { min-height: 40px; display: flex; align-items: center; cursor: pointer; font-weight: 600; }
+.explain p { margin: 4px 0 8px; }
+.proposed { font-size: 13px; color: #6b4b00; background: #fff6dc; border-left: 4px solid #d19b00; padding: 4px 8px; margin: 4px 0 8px; }
+.tag { font-size: 12px; font-weight: 600; color: #6b4b00; background: #fff6dc; border: 1px solid #d19b00; border-radius: 4px; padding: 0 5px; white-space: nowrap; }
+.check { display: flex; align-items: center; gap: 10px; min-height: 44px; cursor: pointer; }
+.check input { width: 22px; height: 22px; margin: 0; flex: 0 0 auto; }
+.field-note { font-size: 13px; color: #555; margin: 6px 0; }
+.route-list { list-style: none; padding: 0; margin: 6px 0; }
+.route-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid #eef0f3; }
+.route-row.sel { background: #fff9c4; }
+.route-pick { flex: 1 1 160px; display: flex; align-items: center; gap: 8px; text-align: left; font-size: 14px; border-color: transparent; background: transparent; padding: 2px 6px; }
+.route-pick[aria-pressed="true"] { border-color: #23324d; }
+.route-type { display: flex; align-items: center; gap: 4px; font-size: 13px; }
+.route-type select { min-height: 40px; padding: 2px 6px; }
+.route-detail { font-size: 14px; }
+.route-detail:empty { display: none; }
+.route-detail dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 6px 0; }
+.route-detail dt { color: #555; }
+.route-detail dd { margin: 0; }
+
+/* Print preview: sheets on a grey desk */
+#print-root { position: fixed; inset: 0; z-index: 50; background: #5b6270; display: flex; flex-direction: column; }
+.print-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 10px; background: #23324d; color: #fff; }
+.print-toolbar h2 { margin: 0; font-size: 18px; }
+.print-toolbar button { background: #33507e; color: #fff; border-color: #5a77a6; }
+.print-zones { display: flex; flex-wrap: wrap; align-items: center; gap: 0 10px; border: 0; margin: 0; padding: 0; min-width: 0; flex: 1 1 260px; }
+.print-zones legend { float: left; padding: 0; margin-right: 6px; font-size: 14px; }
+.print-zones label { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; font-size: 14px; white-space: nowrap; }
+.print-zones input { width: 20px; height: 20px; margin: 0; }
+.print-count { font-size: 14px; color: #d9e2f2; }
+#sheets { flex: 1; overflow: auto; padding: 16px; display: flex; flex-direction: column; align-items: center; gap: 16px; }
+.sheet { flex: 0 0 auto; width: min(100%, 980px); aspect-ratio: 297 / 210; background: #fff; display: flex; flex-direction: column; padding: 2%; box-shadow: 0 2px 10px rgba(0,0,0,.4); }
+.sheet-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; border-bottom: 2px solid #222; }
+.sheet-title { margin: 0; font-size: clamp(11px, 1.9vw, 18px); }
+.sheet-no { font-size: clamp(9px, 1.3vw, 13px); white-space: nowrap; }
+.sheet-sub { margin: 2px 0; font-size: clamp(9px, 1.3vw, 13px); color: #333; }
+.sheet-body { flex: 1; min-height: 0; display: flex; gap: 2%; }
+.sheet-body > .main-drawing { flex: 1; min-width: 0; height: 100%; }
+.sheet-body > .key-plan { flex: 0 0 22%; align-self: flex-start; border: 1px solid #999; }
+.sheet-foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 12px; border-top: 1px solid #999; padding-top: 2px; font-size: clamp(8px, 1.1vw, 12px); }
+
+@media (max-width: 600px) {
+  #topbar { padding: 4px 8px; gap: 6px; min-height: 0; }
+  .topbar-note { display: none; }
+  .preview-label { font-size: 13px; padding: 3px 8px; }
+  #topbar button, #viewbar button, #viewbar select { min-height: 40px; padding: 2px 10px; font-size: 14px; }
+  #viewbar { padding: 6px; gap: 6px; }
+  .zone-pick { flex: 1 1 140px; }
+  .zone-pick select { flex: 1; }
+  .caption { padding: 4px 8px 0; }
+  #view-title { font-size: 15px; }
+  #hint { font-size: 13px; }
+  #panel { position: fixed; left: 0; right: 0; bottom: 0; width: auto; max-height: 62vh; z-index: 20; border-left: 0; border-top: 2px solid #23324d; border-radius: 12px 12px 0 0; box-shadow: 0 -4px 16px rgba(0,0,0,.25); }
+  .print-toolbar { padding: 6px 8px; }
+  #sheets { padding: 8px; }
+}
+@media (min-width: 601px) {
+  #btn-panel-close { display: none; }
+}
+
+@media print {
+  @page { size: A4 landscape; margin: 10mm; }
+  body.print-open #app { display: none !important; }
+  body.print-open #print-root { position: static; display: block; background: none; }
+  .print-toolbar { display: none !important; }
+  #sheets { display: block; padding: 0; overflow: visible; }
+  .sheet { width: 100%; height: 188mm; aspect-ratio: auto; box-shadow: none; padding: 0; break-after: page; page-break-after: always; }
+  .sheet:last-child { break-after: auto; page-break-after: auto; }
+  .sheet-title { font-size: 16px; }
+  .sheet-no, .sheet-sub { font-size: 11px; }
+  .sheet-foot { font-size: 10px; }
+}

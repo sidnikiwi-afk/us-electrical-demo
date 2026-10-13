@@ -1,3 +1,21 @@
+# Zones release, 13 October 2026
+
+Build `surface-proto-v13-floor-zones-20261012` adds named rectangular zones,
+edge resize handles and zone-filtered exterior wall views. Desktop, tablet and
+phone browser journeys cover create, edit, undo, save and reopen. Version-two
+storage preserves older records and checks recovery writes before reporting
+success. A mixed offline build opens read-only.
+
+Interior walls, containment and new print layouts are unfinished and excluded.
+Real iPad/Pencil, Safari and Surface pen testing remains outstanding. Prices
+remain examples; this prototype makes no electrical compliance claims.
+
+The existing PDF quick guide covers the original fitting tools. The README
+explains zones and the storage/rollback limits. Download backups before changing
+versions; the older app cannot read version-two exports.
+
+---
+
 # Release notes
 
 ## Electrical jobs update 1
@@ -36,3 +54,6 @@ you update again. After the update, Jobs offers to add it as a new job.
   room height. The app doesn't guess one.
 - Checks ran in desktop browsers with simulated pen and touch at tablet and
   phone sizes. Real iPad, iPhone and Surface testing hasn't happened yet.
+
+If storage fills before older jobs can be copied, Jobs → Download older jobs
+exports their original-format archive. Their saved records remain untouched.

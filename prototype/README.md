@@ -10,6 +10,21 @@ backups and a print pack.
 tool. Tested with simulated pen and touch — not yet tried on a real iPad or Surface,
 and palm rejection is unverified.**
 
+## Zones update
+
+Build mode adds named rectangular zones to a saved floor. Enter dimensions or
+resize the zone with its edge handles. Select a zone to show its relevant
+exterior wall views; zones do not create walls. The phone details panel folds
+away to leave room for the drawing.
+
+This release includes zones only. Interior wall editing, trunking/conduit and
+new print layouts are still in development. The existing print pack and PDF
+quick guide cover the original fitting tools.
+
+Older jobs are offered as copies in separate version-two storage. Their original
+records stay untouched. Download a backup before switching versions. Older
+versions cannot read version-two backups; retain both versions' exports.
+
 ## Run it
 
 ```sh
@@ -143,3 +158,6 @@ Print defaults to all layers. The optional shown-layers print filters only the d
 The Select tool has a “Set height for several” mode (button in the Room details and under a wall fitting's height field). Tap fittings on the drawing to add or remove them — on any wall — type one height in millimetres and press Apply. One Apply is one undo step, and one Undo restores every fitting it changed.
 
 Safety rules: a ceiling fitting's stored value is a plan position, not a height, so ceiling fittings can never be added (a toast says so, and the core function refuses them too). The raw typed value is range-checked (0 to the room's ceiling height) before rounding to the nearest millimetre; there is no silent clamping. Fittings on hidden layers are removed from the list when the layer is hidden, and IDs that no longer exist or have moved to the ceiling are dropped with a toast; Apply re-checks every ID and changes nothing if any is stale. Only `heightMm` changes — IDs, counts, positions along walls, types, layers, rates and the price breakdown are untouched. Applying a height every selected fitting already has adds no undo step. Cancel, Escape or switching tools leaves the job unchanged. A tap only toggles when the pointer moved less than 12 px, so panning and pinching never change the selection, and a cancelled touch never toggles. The typed value is kept while you tap more fittings.
+
+If storage fills before older jobs can be copied, Jobs → Download older jobs
+exports their original-format archive. Their saved records remain untouched.
