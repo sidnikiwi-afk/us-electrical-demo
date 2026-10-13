@@ -300,6 +300,34 @@ async function wallClip(page) {
   if (await page.locator('.note-pin').count() !== 0) fail('a pin outside the zone is still drawn');
   await shot(page, 'desktop-05-clip.png');
   checks.push({ step: 'desktop-clip', caption, clip, source: sourceHash['prototype/js/floor-zones.js'] });
+  // Wall offsets are face coordinates, not plan coordinates. An empty tap
+  // must preserve both the selected zone and the wall view.
+  await page.locator('[data-testid="tab-PLAN"]').click();
+  await page.locator('button[data-mode="select"]').click();
+  const clearSelection = await svgClient(page, 1000, 4000);
+  await page.mouse.click(clearSelection.x, clearSelection.y);
+  await page.locator('button[data-mode="build"]').click();
+  await (await onlyVisible(page, 'zone-y0')).fill('3000');
+  await (await onlyVisible(page, 'zone-depth')).fill('3000');
+  await (await onlyVisible(page, 'zone-apply')).click();
+  await page.locator('[data-testid="build-add-zone"]').click();
+  await page.locator('[data-testid="build-enter-sizes"]').click();
+  await page.locator('#modal-root [data-testid=\"zone-name\"]').fill('Other zone');
+  await page.locator('#modal-root [data-testid=\"zone-x0\"]').fill('2500');
+  await page.locator('#modal-root [data-testid=\"zone-y0\"]').fill('0');
+  await page.locator('#modal-root [data-testid=\"zone-width\"]').fill('3500');
+  await page.locator('#modal-root [data-testid=\"zone-depth\"]').fill('2700');
+  await page.locator('#modal-root [data-testid=\"zone-apply\"]').click();
+  await page.locator('[data-testid="zone-select"]').selectOption({ label: 'Cutting floor' });
+  await page.locator('button[data-mode="select"]').click();
+  await page.locator('[data-testid="tab-C"]').click();
+  const scopeBefore = await page.locator('[data-testid="zone-select"]').inputValue();
+  const emptyFacePoint = await svgClient(page, 4000, 1800);
+  await page.mouse.click(emptyFacePoint.x, emptyFacePoint.y);
+  if (await page.locator('[data-testid="zone-select"]').inputValue() !== scopeBefore) fail('empty wall tap changed the selected zone');
+  if (!(await page.locator('[data-testid="tab-C"]').getAttribute('class') || '').includes('active')) fail('empty wall tap changed the wall view');
+  checks.push({ step: 'wall-tap-keeps-scope' });
+
 }
 
 async function offlineReload(page) {
@@ -310,6 +338,43 @@ async function offlineReload(page) {
   await page.locator('#btn-job-name', { hasText: 'Barber refit' }).waitFor({ timeout: 10000 });
   await shot(page, 'desktop-06-offline.png');
   checks.push({ step: 'offline-reload', job: 'Barber refit', source: sourceHash['prototype/js/jobs-v2.js'] });
+}
+
+async function quotaOlderExport() {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, acceptDownloads: true });
+  const page = await context.newPage();
+  try {
+    await page.goto(baseUrl);
+    const original = await page.evaluate(async () => {
+      const C = await import('./js/core.js');
+      const V1 = await import('./js/jobs.js');
+      const sha256 = async s => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)))].map(b => b.toString(16).padStart(2, '0')).join('');
+      const older = V1.createJobs({ storage: localStorage, locks: navigator.locks, sha256 });
+      const job = C.blankJob('Uncopied older job');
+      job.room = { widthM: 9, depthM: 6, heightM: 2.7 };
+      const r = await older.create({ job });
+      if (!r.ok) throw new Error('v1 seed failed');
+      const key = V1.JOB_PREFIX + r.jobId;
+      return { key, raw: localStorage.getItem(key) };
+    });
+    await context.addInitScript(() => {
+      const set = Storage.prototype.setItem;
+      Storage.prototype.setItem = function(key, value) {
+        if (String(key).startsWith('surface.jobs.v2.job.')) throw new DOMException('Synthetic full storage', 'QuotaExceededError');
+        return set.call(this, key, value);
+      };
+    });
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.locator('[data-testid="start-continue"]').click();
+    const [download] = await Promise.all([page.waitForEvent('download'), page.locator('[data-testid="jobs-download-older"]').click()]);
+    const archive = JSON.parse(fs.readFileSync(await download.path(), 'utf8'));
+    if (archive.v !== 1 || archive.entries.length !== 1 || archive.entries[0].job.name !== 'Uncopied older job') fail('quota export omitted the original-format older job');
+    const after = await page.evaluate(key => localStorage.getItem(key), original.key);
+    if (after !== original.raw) fail('older-job export changed original saved bytes');
+    const accepted = await page.evaluate(async text => (await import('./js/jobs.js')).validateArchive(text).ok, JSON.stringify(archive));
+    if (!accepted) fail('older-job export is not importable by the v1 archive parser');
+    checks.push({ step: 'quota-older-export', originalBytesUnchanged: true });
+  } finally { await context.close(); }
 }
 
 async function mixedZeroWrite(context) {
@@ -381,6 +446,7 @@ try {
   await runProfile('tablet-768x1024', 768, 1024);
   await runProfile('phone-390x844', 390, 844);
   await runProfile('narrow-360x740', 360, 740, { layoutOnly: true });
+  await quotaOlderExport();
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, serviceWorkers: 'allow' });
   try {
     await mixedZeroWrite(context);

@@ -54,3 +54,6 @@ you update again. After the update, Jobs offers to add it as a new job.
   room height. The app doesn't guess one.
 - Checks ran in desktop browsers with simulated pen and touch at tablet and
   phone sizes. Real iPad, iPhone and Surface testing hasn't happened yet.
+
+If storage fills before older jobs can be copied, Jobs → Download older jobs
+exports their original-format archive. Their saved records remain untouched.

@@ -2,6 +2,7 @@
 // Plain ES modules, no dependencies, no outbound requests.
 import * as C from './core.js';
 import * as J from './jobs-v2.js';
+import * as V1 from './jobs.js';
 import * as F from './floor-zones.js';
 
 const BUILD = 'surface-proto-v13-floor-zones-20261012';
@@ -21,6 +22,7 @@ const NS = 'http://www.w3.org/2000/svg';
 const TEST_HOOKS = window.__SURFACE_TEST__ || {}; // set only by synthetic tests
 const writerTab = 'T' + [...crypto.getRandomValues(new Uint8Array(6))].map(b => b.toString(16).padStart(2, '0')).join('');
 let jobsApi = null;
+let olderJobsApi = null; // read-only source for original-format backups
 let lockSupport = false;
 let access = 'switching';
 let currentId = null;     // record of the open job, null if it has none
@@ -2489,7 +2491,7 @@ function showStart() {
   const s = jobsApi && jobsApi.safeScan();
   $('#start').hidden = false;
   $('#app').hidden = true;
-  $('#start-continue').hidden = !(s && s.jobs.length);
+  $('#start-continue').hidden = !(s && s.jobs.length) && !olderJobsApi?.safeScan()?.jobs.some(j => j.ok);
 }
 function beginJob(j, prefs = null) {
   clearDrafts(); // a pending draft belongs to the job being left, never this one
@@ -2754,9 +2756,19 @@ function openJobsList() {
   modal('Jobs', [box], [
     { label: 'Close', fn: closeModal },
     { label: 'Download all jobs', testid: 'jobs-download-all', fn: () => downloadAllJobs() },
+    ...(olderJobsApi?.safeScan()?.jobs.some(j => j.ok) ? [{ label: 'Download older jobs', testid: 'jobs-download-older', fn: downloadOlderJobs }] : []),
     { label: 'New job', class: 'btn-primary', testid: 'jobs-new', fn: () => { closeModal(); openNewJobForm(); } },
   ]);
   return true;
+}
+// Original-format export reads the old namespace without locks or write authority.
+function downloadOlderJobs() {
+  const s = olderJobsApi && olderJobsApi.safeScan();
+  if (!s) { toast('Older jobs could not be read. Their saved records have not been changed.'); return; }
+  const a = V1.buildArchive(s, new Date().toISOString());
+  if (!a.count) { toast('No readable older jobs to download.'); return; }
+  download(`older-jobs-${stamp()}.json`, a.text, 'application/json');
+  toast(`${a.count} older job${a.count === 1 ? '' : 's'} downloaded in the original format. ${a.unreadable ? `${a.unreadable} unreadable records were not included; their originals are kept.` : 'Check your Downloads folder.'}`, 7000);
 }
 // Saved copies only. Unreadable records are reported, never silently left out.
 function downloadAllJobs() {
@@ -3212,7 +3224,7 @@ $('#canvas').addEventListener('pointerdown', (e) => {
         return;
       }
       // Zone scope changes on lift, so a pan that starts on a zone does not select it.
-      const hitZone = F.zoneAtPoint(F.zonesOf(job), p.x, p.y);
+      const hitZone = view === 'PLAN' ? F.zoneAtPoint(F.zonesOf(job), p.x, p.y) : null;
       panning = {
         sx: e.clientX, sy: e.clientY, tx: zoom.tx, ty: zoom.ty,
         pendingZone: hitZone || null, pendingClear: !hitZone,
@@ -3809,6 +3821,7 @@ async function bootJobs() {
   try { store = window.localStorage; } catch { store = null; }
   const blocked = () => { throw new Error('storage blocked'); };
   const storage = store || { get length() { return blocked(); }, key: blocked, getItem: blocked, setItem: blocked, removeItem: blocked };
+  olderJobsApi = V1.createJobs({ storage, locks: null, sha256: null });
   lockSupport = !!(navigator.locks && typeof navigator.locks.request === 'function' && window.crypto && crypto.subtle);
   const sha256 = lockSupport
     ? async (s) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)))].map(b => b.toString(16).padStart(2, '0')).join('')
@@ -3849,9 +3862,9 @@ async function bootJobs() {
     if (copy && copy.ok === false && copy.reason === 'lock-timeout') {
       toast('An older version of this app is busy in another tab. Older jobs will be copied next time.', 6000);
     } else if (copy && copy.ok === false && copy.reason === 'cap') {
-      toast(`The job list is full (${J.MAX_JOBS} jobs), so ${copy.remaining == null ? 'some' : copy.remaining} older jobs weren’t copied. Open Jobs to remove one, or download them.`, 7000);
+      toast(`The job list is full (${J.MAX_JOBS} jobs), so ${copy.remaining == null ? 'some' : copy.remaining} older jobs weren’t copied. Open Jobs to remove one, or choose Download older jobs to back up the originals.`, 7000);
     } else if (copy && copy.ok === false && copy.reason === 'quota') {
-      toast(`Only ${copy.copied} older jobs could be copied because this device’s storage is full. The rest are still saved in the older format. Download all jobs to keep a copy.`, 7000);
+      toast(`Only ${copy.copied} older jobs could be copied because this device’s storage is full. The rest are still saved in the older format. Open Jobs and choose Download older jobs to back up the original records.`, 7000);
     }
   }
   const s = jobsApi.safeScan();
