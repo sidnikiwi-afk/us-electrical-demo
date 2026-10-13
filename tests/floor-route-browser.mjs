@@ -423,6 +423,13 @@ async function runProfile(browserHandle, prof) {
     if (prof.key.startsWith('phone') || prof.key.startsWith('narrow')) await assertToastClearsSaveChip(page);
     if (await historyCount(page) !== beforeShort) fail('short edit added a history frame');
     if ((await page.locator('#inspector [data-testid="route-end"]').inputValue()) !== storedEnd) fail('short edit kept the refused end');
+    // equal ends are on the wall but have no length, so they get the length message, not the wall one
+    const startValue = await (await ensureDetails(page, prof.touch, 'route-start')).inputValue();
+    await page.evaluate(() => { document.querySelector('[data-testid="toast"]').textContent = ''; });
+    await (await ensureDetails(page, prof.touch, 'route-end')).fill(startValue);
+    await press(page.locator('#inspector [data-testid="route-apply"]'), prof.touch);
+    await waitToast(page, 'A run must be at least 50 mm long.');
+    if (await historyCount(page) !== beforeShort) fail('equal-ends edit added a history frame');
 
     await press(page.locator('[data-testid="tab-PLAN"]'), prof.touch);
     await press(await onlyVisible(page, 'mode-build'), prof.touch);

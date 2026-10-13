@@ -65,12 +65,25 @@ function plainJob() {
   return job;
 }
 
+// A legacy job whose fitting notes are as long as the app allows, so table rows wrap onto several lines.
+function longNotesJob() {
+  const job = C.blankJobV2('Long notes print');
+  job.room = { widthM: 9, depthM: 6, heightM: 2.7 };
+  const note = 'Check the existing back box and cable route before fixing; customer wants this kept clear of the mirror and the shelf. '.repeat(5).slice(0, 500);
+  // a full wall A plus a few on the others: the rule must budget each wrapped row, not one line per row
+  for (let i = 0; i < 12; i++) C.placeItem(job, i % 2 ? 'switch' : 'surface', 'A', 300 + i * 700, i % 2 ? 1200 : 450, note);
+  for (const wall of ['B', 'C', 'D']) C.placeItem(job, 'surface', wall, 600, 450, note);
+  return job;
+}
+
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'floor-print-pack-'));
 const zonedPath = path.join(tmp, 'zoned.json');
 const plainPath = path.join(tmp, 'plain.json');
 const zoned = zonedJob();
 fs.writeFileSync(zonedPath, C.serialiseJob(zoned));
 fs.writeFileSync(plainPath, C.serialiseJob(plainJob()));
+const longNotesPath = path.join(tmp, 'long-notes.json');
+fs.writeFileSync(longNotesPath, C.serialiseJob(longNotesJob()));
 const priceBefore = JSON.stringify(C.breakdown(zoned));
 
 const server = http.createServer((req, res) => {
@@ -211,6 +224,39 @@ async function sheetText(page, wall, face) {
   const sheet = page.locator(`#print-pack .wall-sheet[data-wall="${wall}"][data-face="${face}"]`);
   if (await sheet.count() !== 1) fail(`${wall} ${face}: expected 1 sheet, found ${await sheet.count()}`);
   return sheet;
+}
+
+// The barber sample has no zones, interior walls or routes, so it prints the legacy pack, and its
+// fitting tables are long. Two walls and their tables cannot share one A4 landscape sheet, so each
+// wall prints on its own numbered page and "Page n of N" still matches the paper.
+async function legacyLongTables(browserHandle, prof, dir) {
+  const context = await browserHandle.newContext({
+    viewport: { width: prof.width, height: prof.height },
+    hasTouch: prof.touch,
+    isMobile: prof.mobile,
+    serviceWorkers: 'allow',
+  });
+  const page = await context.newPage();
+  page.setDefaultTimeout(15000);
+  page.setDefaultNavigationTimeout(20000);
+  const errors = [];
+  page.on('pageerror', (err) => errors.push(String(err)));
+  await page.addInitScript(() => { window.print = () => { window.__printed = (window.__printed || 0) + 1; }; });
+  try {
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => document.documentElement.dataset.jobsBoot === 'ready');
+    await press(page.locator('[data-testid="start-sample"]'), prof.touch);
+    await page.locator('#btn-job-name').waitFor({ state: 'visible' });
+    await openPrint(page, prof.touch);
+    await goPrint(page, prof.touch);
+    if (await page.locator('#print-pack .wall-sheet').count() !== 0) fail('barber sample used the zone pack');
+    const heads = (await page.locator('#print-pack .page.legacy-walls h2').allInnerTexts()).filter((h) => /^Wall /.test(h));
+    if (JSON.stringify(heads) !== JSON.stringify(['Wall A', 'Wall B', 'Wall C', 'Wall D'])) fail(`barber legacy walls ${JSON.stringify(heads)}`);
+    await pdfFitsPages(page, path.join(dir, 'legacy-long.pdf'));
+    if (errors.length) fail(`barber print page errors ${errors.join(' | ')}`);
+  } finally {
+    await context.close();
+  }
 }
 
 async function runProfile(browserHandle, prof) {
@@ -471,6 +517,24 @@ async function runProfile(browserHandle, prof) {
     if (JSON.stringify(await screenState(page)) !== JSON.stringify(plainState)) fail('legacy print changed the screen');
     await pdfFitsPages(page, path.join(dir, 'legacy.pdf'));
     steps.push('legacy-four-page');
+
+    await legacyLongTables(browserHandle, prof, dir);
+    steps.push('legacy-long-tables');
+
+    // wrapped notes must still leave every numbered page on one sheet
+    await page.setInputFiles('#file-input', longNotesPath);
+    await press(page.locator('[data-testid="import-confirm"]'), prof.touch);
+    await page.waitForFunction(() => Object.values(localStorage).some((v) => v.includes('"name":"Long notes print"')));
+    await page.waitForFunction(() => /^Saved on this device/.test(String((document.querySelector('[data-testid="save-chip"]') || {}).textContent || '').trim()));
+    await openPrint(page, prof.touch);
+    await goPrint(page, prof.touch);
+    if (await page.locator('#print-pack .wall-sheet').count() !== 0) fail('long-notes job used the zone pack');
+    const noteRows = await page.locator('#print-pack .page.legacy-walls tr').evaluateAll((rows) => rows.filter((r) => /^F\d+$/.test((r.cells[0] || {}).textContent || '')).length);
+    if (noteRows !== 15) fail(`long-notes pack shows ${noteRows} fitting rows, expected 15`);
+    const contHeads = (await page.locator('#print-pack .page.legacy-walls h2').allInnerTexts()).filter((h) => /continued/i.test(h));
+    if (!contHeads.length || contHeads.some((h) => h !== 'Wall A (continued)')) fail('continuation headings ' + JSON.stringify(contHeads));
+    await pdfFitsPages(page, path.join(dir, 'legacy-long-notes.pdf'));
+    steps.push('legacy-long-notes');
 
     if (pageErrors.length) fail(`page errors ${pageErrors.join(' | ')}`);
     if (external.length) fail(`external requests: ${external.join(' | ')}`);

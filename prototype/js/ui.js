@@ -8,7 +8,7 @@ import * as Walls from './floor-walls.js';
 import * as Routes from './floor-routes.js';
 import * as Print from './floor-print.js';
 
-const BUILD = 'surface-proto-v17-floor-final-20261013';
+const BUILD = 'surface-proto-v18-floor-fixes-20261013';
 const CONTAINMENT_WARNING = "Containment isn't priced or measured in this version.";
 const buildMixed = BUILD !== C.BUILD || BUILD !== J.BUILD || BUILD !== F.BUILD || BUILD !== Walls.BUILD || BUILD !== Routes.BUILD || BUILD !== Print.BUILD;
 
@@ -1647,6 +1647,51 @@ function renderInteriorFace(content, parsed, { H }, show = isShown) {
   return { L: fullL, H, fromMm: x0, toMm: x1 };
 }
 
+// Floating Layers / zoom controls sit on the plan. Grow the top of the viewBox
+// until wall A (plan y = 0) is below that strip. Desktop stays put when the
+// 900 mm margin already clears them. Pinch and pan still use the world transform.
+function topOverlayPx(svg) {
+  const box = svg.getBoundingClientRect();
+  if (box.width < 1 || box.height < 1) return 0;
+  let bottom = 0;
+  for (const id of ['layers-control', 'zoom-controls', 'btn-finger-draw']) {
+    const node = document.getElementById(id);
+    if (!node || node.hidden) continue;
+    const r = node.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) continue;
+    if (Math.min(r.right, box.right) <= Math.max(r.left, box.left)) continue;
+    const top = r.top - box.top;
+    const bot = r.bottom - box.top;
+    if (bot <= 0 || top > box.height * 0.45) continue;
+    if (bot > bottom) bottom = bot;
+  }
+  return bottom;
+}
+function planTopFit(svg, vbX, vbY, vbW, vbH) {
+  const cover = Math.ceil(topOverlayPx(svg));
+  const base = { vbX, vbY, vbW, vbH };
+  if (cover <= 0) return base;
+  const box = svg.getBoundingClientRect();
+  const need = cover + 2;
+  const yOf = (extra) => {
+    const h = vbH + extra;
+    const y = vbY - extra;
+    const scale = Math.min(box.width / vbW, box.height / h);
+    const oy = (box.height - h * scale) / 2;
+    return oy + (0 - y) * scale;
+  };
+  if (yOf(0) >= need) return base;
+  let lo = 0;
+  let hi = vbH;
+  while (yOf(hi) < need && hi < 5000000) hi *= 2;
+  for (let i = 0; i < 28; i += 1) {
+    const mid = (lo + hi) / 2;
+    if (yOf(mid) >= need) hi = mid;
+    else lo = mid;
+  }
+  const extra = Math.ceil(hi);
+  return { vbX, vbY: vbY - extra, vbW, vbH: vbH + extra };
+}
 function renderCanvas() {
   const svg = $('#canvas');
   svg.innerHTML = '';
@@ -1668,6 +1713,10 @@ function renderCanvas() {
   } else {
     const L = (view === 'A' || view === 'C') ? dims.W : dims.D;
     vbW = L + 1800; vbH = dims.H + 1800;
+  }
+  if (view === 'PLAN') {
+    const fit = planTopFit(svg, vbX, vbY, vbW, vbH);
+    vbX = fit.vbX; vbY = fit.vbY; vbW = fit.vbW; vbH = fit.vbH;
   }
   svg.setAttribute('viewBox', `${vbX} ${vbY} ${vbW} ${vbH}`);
   const world = svgEl('g', { id: 'world', transform: `translate(${zoom.tx} ${zoom.ty}) scale(${zoom.s})` }, svg);
@@ -2558,7 +2607,8 @@ function applyRouteFields(route, fields, length) {
   }
   const blocked = clipRefusal(spec);
   if (blocked) { toast(blocked); renderAll(); return; }
-  if (start < 0 || end > length || start >= end) {
+  // Equal ends sit on the wall but have no length. A reversed pair does not.
+  if (start < 0 || end > length || start > end) {
     toast(`Keep the run on this wall, which is ${(length / 1000).toFixed(2)} m long.`);
     renderAll();
     return;
@@ -3172,7 +3222,10 @@ function fittingTable(items, ceilingCoords = false) {
   if (!items.length && !ceilingCoords) {
     return el('p', { 'data-testid': 'print-no-fittings' }, 'No fittings on this wall.');
   }
-  const t = el('table');
+  const t = el('table', { class: 'fitting-table' });
+  const colgroup = el('colgroup');
+  for (const name of ['fit-id', 'fit-type', 'fit-pos', 'fit-h', 'fit-notes']) colgroup.appendChild(el('col', { class: name }));
+  t.appendChild(colgroup);
   const head = el('tr');
   const cols = ceilingCoords ? ['ID', 'Type', 'x (mm)', 'y (mm)', 'Notes'] : ['ID', 'Type', 'From left (mm)', 'Height (mm)', 'Notes'];
   for (const h of cols) head.appendChild(el('th', {}, h));
@@ -3416,6 +3469,31 @@ function drawFullPlan(parent, dims, show) {
   try { renderPlan(parent, dims, show); }
   finally { zoneId = savedZone; view = savedView; }
 }
+function printScopeText(layers, hiddenN) {
+  if (!layers) return '';
+  const hiddenLayers = C.LAYERS.filter(l => !layers.has(l)).map(l => C.LAYER_LABELS[l]);
+  return `These drawings show ${C.visibilityLabel(layers)} only. Not drawn: ${hiddenLayers.join(', ')} (${hiddenN} fitting${hiddenN === 1 ? '' : 's'}), still included in the labour breakdown. Sketches are shared by all layers.`;
+}
+function legacyCells(item) {
+  const ceiling = item.wall === C.CEILING;
+  return [
+    item.id,
+    C.TYPES[item.type].label,
+    ceiling ? `x ${item.fromLeftMm}` : String(item.fromLeftMm),
+    ceiling ? `y ${item.heightMm}` : String(item.heightMm),
+    item.notes || '',
+  ];
+}
+function legacyWallRows(show) {
+  const rows = { A: [], B: [], C: [], D: [], ceiling: [] };
+  for (const item of job.items) {
+    if (!show(item)) continue;
+    const cells = legacyCells(item);
+    if (item.wall === C.CEILING) rows.ceiling.push(cells);
+    else if (Object.prototype.hasOwnProperty.call(rows, item.wall)) rows[item.wall].push(cells);
+  }
+  return rows;
+}
 function buildPrintPack(includeInk = true, layers = null, sheetChoice = null) {
   if (window.__SURFACE_TEST__ && window.__SURFACE_TEST__.printIncludeInk === false) includeInk = false;
   const choice = sheetChoice || { whole: true, zoneIds: [] };
@@ -3427,8 +3505,8 @@ function buildLegacyPrintPack(includeInk = true, layers = null) {
   pack.innerHTML = '';
   const show = layers ? (it) => layers.has(C.layerOf(it)) : () => true;
   const drawScope = layers ? `Drawings: ${C.visibilityLabel(layers)} only` : 'All layers';
-  const hiddenLayers = layers ? C.LAYERS.filter(l => !layers.has(l)).map(l => C.LAYER_LABELS[l]) : [];
   const hiddenN = job.items.filter(it => !show(it)).length;
+  const scopeText = printScopeText(layers, hiddenN);
   const dims = roomMm();
   const dateStr = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
   const savedStr = job.savedAt ? `saved ${new Date(job.savedAt).toLocaleString('en-GB')}` : 'not yet saved';
@@ -3441,9 +3519,8 @@ function buildLegacyPrintPack(includeInk = true, layers = null) {
     return p;
   };
   const scopeNote = (page) => {
-    if (!layers) return;
-    page.appendChild(el('p', { class: 'print-scope' },
-      `These drawings show ${C.visibilityLabel(layers)} only. Not drawn: ${hiddenLayers.join(', ')} (${hiddenN} fitting${hiddenN === 1 ? '' : 's'}), still included in the labour breakdown. Sketches are shared by all layers.`));
+    if (!scopeText) return;
+    page.appendChild(el('p', { class: 'print-scope' }, scopeText));
   };
   const svgFor = (viewName) => {
     const svg = document.createElementNS(NS, 'svg');
@@ -3484,21 +3561,23 @@ function buildLegacyPrintPack(includeInk = true, layers = null) {
   p1.appendChild(el('p', {}, `${job.room.widthM.toFixed(2)} × ${job.room.depthM.toFixed(2)} × ${job.room.heightM.toFixed(2)} m (w × d × h)`));
   p1.appendChild(el('p', {}, job.jobNotes || '(no job notes)'));
 
-  let page = null;
-  C.WALLS.forEach((w, idx) => {
-    if (idx % 2 === 0) {
-      page = mkPage(drawScope);
-      page.classList.add('legacy-walls');
-      scopeNote(page);
+  const onWall = (wall) => job.items.filter((item) => item.wall === wall && show(item));
+  for (const spec of Print.planLegacyWalls(legacyWallRows(show), scopeText)) {
+    const page = mkPage(drawScope);
+    page.classList.add('legacy-walls');
+    scopeNote(page);
+    for (const block of spec.blocks) {
+      if (block.kind === 'ceiling') {
+        page.appendChild(el('h2', {}, 'Ceiling fittings'));
+        page.appendChild(fittingTable(onWall(C.CEILING).slice(block.from, block.to), true));
+        continue;
+      }
+      if (block.svg) {
+        page.appendChild(el('h2', {}, layers ? `Wall ${block.wall} — ${C.visibilityLabel(layers)} only` : `Wall ${block.wall}`));
+        page.appendChild(svgFor(block.wall));
+      } else page.appendChild(el('h2', {}, `Wall ${block.wall} (continued)`));
+      page.appendChild(fittingTable(onWall(block.wall).slice(block.from, block.to)));
     }
-    page.appendChild(el('h2', {}, layers ? `Wall ${w} — ${C.visibilityLabel(layers)} only` : `Wall ${w}`));
-    page.appendChild(svgFor(w));
-    page.appendChild(fittingTable(job.items.filter(i => i.wall === w && show(i))));
-  });
-  const ceil = job.items.filter(i => i.wall === C.CEILING && show(i));
-  if (ceil.length) {
-    page.appendChild(el('h2', {}, 'Ceiling fittings'));
-    page.appendChild(fittingTable(ceil, true));
   }
 
   const pL = mkPage('Whole job, all layers');
@@ -3510,8 +3589,8 @@ function buildZonePrintPack(includeInk, layers, choice) {
   pack.innerHTML = '';
   const show = layers ? (it) => layers.has(C.layerOf(it)) : () => true;
   const drawScope = layers ? `Drawings: ${C.visibilityLabel(layers)} only` : 'All layers';
-  const hiddenLayers = layers ? C.LAYERS.filter(l => !layers.has(l)).map(l => C.LAYER_LABELS[l]) : [];
   const hiddenN = job.items.filter(it => !show(it)).length;
+  const scopeText = printScopeText(layers, hiddenN);
   const dims = roomMm();
   const dateStr = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
   const savedStr = job.savedAt ? `saved ${new Date(job.savedAt).toLocaleString('en-GB')}` : 'not yet saved';
@@ -3525,9 +3604,8 @@ function buildZonePrintPack(includeInk, layers, choice) {
     return p;
   };
   const scopeNote = (page) => {
-    if (!layers) return;
-    page.appendChild(el('p', { class: 'print-scope' },
-      `These drawings show ${C.visibilityLabel(layers)} only. Not drawn: ${hiddenLayers.join(', ')} (${hiddenN} fitting${hiddenN === 1 ? '' : 's'}), still included in the labour breakdown. Sketches are shared by all layers.`));
+    if (!scopeText) return;
+    page.appendChild(el('p', { class: 'print-scope' }, scopeText));
   };
 
   const overview = mkPage(drawScope);
@@ -3644,7 +3722,17 @@ function openPrint() {
   const countEl = el('p', { class: 'print-sheet-count', 'data-testid': 'print-sheet-count' });
   sheets.appendChild(countEl);
   const tickedIds = () => zoneBoxes.filter(input => input.checked).map(input => input.value);
+  // Snapshot layers while the dialog is built. The count and the pack share it.
+  const chosen = new Set(shownLayers);
   const refreshCount = () => {
+    if (wholeBox.checked && Print.useLegacyPack(job)) {
+      const legacyShow = shownR.checked ? (item) => chosen.has(C.layerOf(item)) : () => true;
+      const hiddenN = shownR.checked ? job.items.filter((item) => !chosen.has(C.layerOf(item))).length : 0;
+      const scopeText = shownR.checked ? printScopeText(chosen, hiddenN) : '';
+      const pages = Print.legacyPageCount(legacyWallRows(legacyShow), scopeText);
+      countEl.textContent = Print.countLine(pages, 0);
+      return;
+    }
     const plan = Print.planSheets(job, { whole: wholeBox.checked, zoneIds: wholeBox.checked ? [] : tickedIds() });
     countEl.textContent = Print.countLine(plan.sheets.length, plan.sharedWalls);
   };
@@ -3658,11 +3746,12 @@ function openPrint() {
       refreshCount();
     });
   }
+  for (const input of box.querySelectorAll('input[name="print-scope"]')) {
+    input.addEventListener('change', refreshCount);
+  }
   refreshCount();
   box.appendChild(sheets);
-  // Snapshot layers now so the printed pages match what was chosen here.
   // Wall-sheet ticks are read at click, before the dialog is removed.
-  const chosen = new Set(shownLayers);
   modal('Print', [box], [
     { label: 'Cancel', fn: closeModal },
     { label: 'Print', class: 'btn-primary', testid: 'print-go', fn: () => {

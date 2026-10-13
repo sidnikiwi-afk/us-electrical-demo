@@ -5,7 +5,7 @@
 import { facesFor, isWallId, wallAxis, wallLength } from './floor-walls.js';
 import { routeLabel } from './floor-routes.js';
 
-export const BUILD = 'surface-proto-v17-floor-final-20261013';
+export const BUILD = 'surface-proto-v18-floor-fixes-20261013';
 
 export function zonesOf(job) {
   const list = job && job.floor && Array.isArray(job.floor.zones) ? job.floor.zones : [];
