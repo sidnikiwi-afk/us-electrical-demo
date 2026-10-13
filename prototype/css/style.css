@@ -151,6 +151,14 @@ button.q-chip { border: 0; font: inherit; color: inherit; cursor: pointer; }
   #print-pack tr { break-inside: avoid; page-break-inside: avoid; }
   #print-pack thead { display: table-header-group; }
   #print-pack th, #print-pack td { border: 1px solid #000; padding: 3px 5px; text-align: left; }
+  /* Fixed fitting columns on A4 landscape (297mm). floor-print.js uses the same
+     widths to count wrapped lines. 18+52+36+30+161 = 297. */
+  #print-pack table.fitting-table { table-layout: fixed; }
+  #print-pack table.fitting-table col.fit-id { width: 18mm; }
+  #print-pack table.fitting-table col.fit-type { width: 52mm; }
+  #print-pack table.fitting-table col.fit-pos { width: 36mm; }
+  #print-pack table.fitting-table col.fit-h { width: 30mm; }
+  #print-pack table.fitting-table col.fit-notes { width: 161mm; }
   #print-pack svg { max-width: 100%; height: auto; }
   #print-pack .print-key { max-width: 70mm; }
   /* Zone pack: each numbered page must fit one A4 landscape sheet, so cap the

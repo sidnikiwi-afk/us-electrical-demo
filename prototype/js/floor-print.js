@@ -173,72 +173,147 @@ export function countLine(sheetCount, sharedWalls) {
   return sheets;
 }
 
-// Legacy wall pages: A4 landscape is 210mm tall (print CSS has no @page margin).
-// Each wall drawing is capped at 72mm. The other sizes are the print rules in
-// style.css: 2px border and 6px padding on .page, 9.5pt header, 11pt h2 with
-// 8px and 4px margins, 9pt rows with 3px padding, a 9pt footer, and the 16px
-// "No fittings" paragraph. Line height is the 1.4 set on body.
+// Legacy wall pages: A4 landscape is 210mm tall and 297mm wide (print CSS has
+// no @page margin). Each wall drawing is capped at 72mm. The other sizes are
+// the print rules in style.css: 2px border and 6px padding on .page, 9.5pt
+// header, 11pt h2 with 8px and 4px margins, 9pt rows with 3px padding, a 9pt
+// footer, and the 16px "No fittings" paragraph. Line height is the 1.4 set
+// on body. Fitting columns are the fixed mm widths on table.fitting-table.
 const LEGACY_SHEET_MM = 210;
+const LEGACY_PAGE_W_MM = 297;
 const LEGACY_SVG_MM = 72;
 const PX_MM = 25.4 / 96;
 const PT_MM = 25.4 / 72;
 const lineMm = (pt) => pt * PT_MM * 1.4;
 const LEGACY_CHROME_MM = PX_MM * (2 + 6 + 1) + lineMm(9.5) + lineMm(9) + 9 * PT_MM;
 const LEGACY_H2_MM = PX_MM * (8 + 4) + lineMm(11);
-const LEGACY_ROW_MM = lineMm(9) + PX_MM * (3 + 3 + 1);
+const LEGACY_ROW_PAD_MM = PX_MM * (3 + 3 + 1);
 const LEGACY_EMPTY_MM = PX_MM * 16 * 1.4 + PX_MM * 16 * 2;
-const LEGACY_SCOPE_MM = lineMm(9.5) + PX_MM * (3 + 3 + 1 + 1 + 4 + 4);
+const LEGACY_SCOPE_PAD_MM = PX_MM * (3 + 3 + 1 + 1 + 4 + 4);
+const LEGACY_SCOPE_MM = lineMm(9.5) + LEGACY_SCOPE_PAD_MM;
+// 18+52+36+30+161 = 297. Same widths as the print CSS col rules.
+const FIT_COL_MM = [18, 52, 36, 30, 161];
+// Wider than an average system-ui glyph, and a word of slack, so a row is
+// counted taller than it prints. Short labels still fit on one line.
+const FIT_EM = 0.65;
+const WORD_SLACK = 12;
+const charsAcross = (widthMm, padPx, pt, em) => {
+  const content = widthMm - PX_MM * padPx;
+  return Math.max(1, Math.floor(content / (pt * PT_MM * em)));
+};
+const FIT_CHARS = FIT_COL_MM.map(mm => charsAcross(mm, 5 + 5 + 1, 9, FIT_EM));
+const SCOPE_CHARS = charsAcross(LEGACY_PAGE_W_MM, 6 + 6 + 1 + 1, 9.5, 0.75);
+const WALL_HEAD = ['ID', 'Type', 'From left (mm)', 'Height (mm)', 'Notes'];
+const CEIL_HEAD = ['ID', 'Type', 'x (mm)', 'y (mm)', 'Notes'];
 
-function legacyChromeMm(scopeNote) {
-  return LEGACY_CHROME_MM + (scopeNote ? LEGACY_SCOPE_MM : 0);
+function wrappedLines(text, chars) {
+  const len = String(text ?? '').length;
+  if (len <= chars) return 1;
+  return Math.ceil(len / Math.max(1, chars - WORD_SLACK));
 }
 
-// svg: the 72mm drawing. rows 0 with a drawing is the empty-wall note.
-function legacySectionMm(rows, svg) {
+function rowLines(cells) {
+  const list = Array.isArray(cells) ? cells : [];
+  let lines = 1;
+  for (let i = 0; i < FIT_CHARS.length; i += 1) {
+    lines = Math.max(lines, wrappedLines(list[i] || '', FIT_CHARS[i]));
+  }
+  return lines;
+}
+
+function headerLines(ceiling) {
+  const heads = ceiling ? CEIL_HEAD : WALL_HEAD;
+  let lines = 1;
+  for (let i = 0; i < heads.length; i += 1) lines = Math.max(lines, wrappedLines(heads[i], FIT_CHARS[i]));
+  return lines;
+}
+
+// One text line plus the cell padding. Extra wrapped lines add line height only.
+function rowMm(lines) {
+  return Math.max(1, lines) * lineMm(9) + LEGACY_ROW_PAD_MM;
+}
+
+function asLines(rows) {
+  if (typeof rows === 'number') return Array.from({ length: Math.max(0, rows) }, () => 1);
+  if (!Array.isArray(rows)) return [];
+  return rows.map(rowLines);
+}
+
+function scopeMm(scopeNote) {
+  if (!scopeNote) return 0;
+  if (scopeNote === true) return LEGACY_SCOPE_MM;
+  const lines = wrappedLines(scopeNote, SCOPE_CHARS);
+  return lines * lineMm(9.5) + LEGACY_SCOPE_PAD_MM;
+}
+
+function legacyChromeMm(scopeNote) {
+  return LEGACY_CHROME_MM + scopeMm(scopeNote);
+}
+
+// svg: the 72mm drawing. No rows and a drawing is the empty-wall note.
+function legacySectionMm(lines, svg, ceiling) {
   const head = LEGACY_H2_MM + (svg ? LEGACY_SVG_MM : 0);
-  if (rows <= 0) return svg ? head + LEGACY_EMPTY_MM : 0;
-  return head + (rows + 1) * LEGACY_ROW_MM;
+  if (!lines.length) return svg ? head + LEGACY_EMPTY_MM : 0;
+  let body = rowMm(headerLines(ceiling));
+  for (const n of lines) body += rowMm(n);
+  return head + body;
 }
 
 function legacyFits(contentMm, scopeNote) {
   return legacyChromeMm(scopeNote) + contentMm <= LEGACY_SHEET_MM;
 }
 
-function rowsThatFit(roomMm, fixedMm) {
-  return Math.floor((roomMm - fixedMm) / LEGACY_ROW_MM + 1e-6);
+// How many rows from `from` fit in room after fixed chrome. A row taller than
+// the room is not included; the caller still places that single row.
+function rowsThatFit(roomMm, fixedMm, lines, from) {
+  let used = fixedMm;
+  let n = 0;
+  while (from + n < lines.length) {
+    const h = rowMm(lines[from + n]);
+    if (used + h > roomMm + 1e-6) break;
+    used += h;
+    n += 1;
+  }
+  return n;
+}
+
+function rowsHeight(lines, from, n) {
+  let h = 0;
+  for (let i = 0; i < n; i += 1) h += rowMm(lines[from + i]);
+  return h;
 }
 
 // One wall, then any ceiling rows that follow wall D. Split the table when
-// the drawing plus every row will not stay on one sheet.
-function paginateLegacyWall(wall, rows, ceilingRows, scopeNote) {
+// the drawing plus the wrapped rows will not stay on one sheet.
+function paginateLegacyWall(wall, lines, ceilingLines, scopeNote) {
   const pages = [];
   let from = 0;
   let cfrom = 0;
   let started = false;
-  for (let guard = 0; guard < 40 && (!started || from < rows || cfrom < ceilingRows); guard += 1) {
+  const limit = lines.length + ceilingLines.length + 2;
+  for (let guard = 0; guard < limit && (!started || from < lines.length || cfrom < ceilingLines.length); guard += 1) {
     let room = LEGACY_SHEET_MM - legacyChromeMm(scopeNote);
     const blocks = [];
-    if (!started || from < rows) {
+    if (!started || from < lines.length) {
       const svg = !started;
       const head = LEGACY_H2_MM + (svg ? LEGACY_SVG_MM : 0);
-      if (!started && rows <= 0) {
+      if (!started && lines.length === 0) {
         blocks.push({ kind: 'wall', wall, from: 0, to: 0, svg: true });
         room -= head + LEGACY_EMPTY_MM;
         started = true;
-      } else if (from < rows) {
-        const fixed = head + LEGACY_ROW_MM;
-        let n = rowsThatFit(room, fixed);
+      } else if (from < lines.length) {
+        const fixed = head + rowMm(headerLines(false));
+        let n = rowsThatFit(room, fixed, lines, from);
         if (n < 1) n = 1;
-        n = Math.min(n, rows - from);
         blocks.push({ kind: 'wall', wall, from, to: from + n, svg });
-        room -= fixed + n * LEGACY_ROW_MM;
+        room -= fixed + rowsHeight(lines, from, n);
         from += n;
         started = true;
       }
     }
-    if (started && from >= rows && cfrom < ceilingRows) {
-      const fixed = LEGACY_H2_MM + LEGACY_ROW_MM;
-      let n = rowsThatFit(room, fixed);
+    if (started && from >= lines.length && cfrom < ceilingLines.length) {
+      const fixed = LEGACY_H2_MM + rowMm(headerLines(true));
+      let n = rowsThatFit(room, fixed, ceilingLines, cfrom);
       if (n < 1) {
         if (blocks.length) {
           pages.push({ blocks });
@@ -246,7 +321,6 @@ function paginateLegacyWall(wall, rows, ceilingRows, scopeNote) {
         }
         n = 1;
       }
-      n = Math.min(n, ceilingRows - cfrom);
       blocks.push({ kind: 'ceiling', from: cfrom, to: cfrom + n });
       cfrom += n;
     }
@@ -256,26 +330,31 @@ function paginateLegacyWall(wall, rows, ceilingRows, scopeNote) {
   return pages;
 }
 
-// counts: { A, B, C, D, ceiling } row counts. scopeNote reserves the layer line.
-// Pairs stay together only when both walls, their tables, and the ceiling
-// fittings after wall D fit one sheet. Otherwise each wall has its own page.
-export function planLegacyWalls(counts, scopeNote) {
+// walls: { A, B, C, D, ceiling }, each an array of fitting cell strings
+// (one row). A number still means that many single-line rows. scopeNote is
+// the layer paragraph, or a truthy flag for one reserved line. Pairs stay
+// together only when both walls, their wrapped tables, and the ceiling
+// fittings after wall D fit one sheet. Otherwise each wall has its own pages.
+export function planLegacyWalls(walls, scopeNote) {
   const pages = [];
+  const group = walls || {};
   for (const [left, right] of [['A', 'B'], ['C', 'D']]) {
-    const ceiling = right === 'D' ? (counts.ceiling || 0) : 0;
-    const content = legacySectionMm(counts[left] || 0, true)
-      + legacySectionMm(counts[right] || 0, true)
-      + (ceiling > 0 ? legacySectionMm(ceiling, false) : 0);
+    const leftLines = asLines(group[left]);
+    const rightLines = asLines(group[right]);
+    const ceilingLines = right === 'D' ? asLines(group.ceiling) : [];
+    const content = legacySectionMm(leftLines, true, false)
+      + legacySectionMm(rightLines, true, false)
+      + (ceilingLines.length ? legacySectionMm(ceilingLines, false, true) : 0);
     if (legacyFits(content, scopeNote)) {
       const blocks = [
-        { kind: 'wall', wall: left, from: 0, to: counts[left] || 0, svg: true },
-        { kind: 'wall', wall: right, from: 0, to: counts[right] || 0, svg: true },
+        { kind: 'wall', wall: left, from: 0, to: leftLines.length, svg: true },
+        { kind: 'wall', wall: right, from: 0, to: rightLines.length, svg: true },
       ];
-      if (ceiling > 0) blocks.push({ kind: 'ceiling', from: 0, to: ceiling });
+      if (ceilingLines.length) blocks.push({ kind: 'ceiling', from: 0, to: ceilingLines.length });
       pages.push({ blocks });
     } else {
-      pages.push(...paginateLegacyWall(left, counts[left] || 0, 0, scopeNote));
-      pages.push(...paginateLegacyWall(right, counts[right] || 0, ceiling, scopeNote));
+      pages.push(...paginateLegacyWall(left, leftLines, [], scopeNote));
+      pages.push(...paginateLegacyWall(right, rightLines, ceilingLines, scopeNote));
     }
   }
   return pages;

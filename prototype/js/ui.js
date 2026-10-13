@@ -3222,7 +3222,10 @@ function fittingTable(items, ceilingCoords = false) {
   if (!items.length && !ceilingCoords) {
     return el('p', { 'data-testid': 'print-no-fittings' }, 'No fittings on this wall.');
   }
-  const t = el('table');
+  const t = el('table', { class: 'fitting-table' });
+  const colgroup = el('colgroup');
+  for (const name of ['fit-id', 'fit-type', 'fit-pos', 'fit-h', 'fit-notes']) colgroup.appendChild(el('col', { class: name }));
+  t.appendChild(colgroup);
   const head = el('tr');
   const cols = ceilingCoords ? ['ID', 'Type', 'x (mm)', 'y (mm)', 'Notes'] : ['ID', 'Type', 'From left (mm)', 'Height (mm)', 'Notes'];
   for (const h of cols) head.appendChild(el('th', {}, h));
@@ -3466,14 +3469,30 @@ function drawFullPlan(parent, dims, show) {
   try { renderPlan(parent, dims, show); }
   finally { zoneId = savedZone; view = savedView; }
 }
-function legacyWallCounts(show) {
-  const counts = { A: 0, B: 0, C: 0, D: 0, ceiling: 0 };
+function printScopeText(layers, hiddenN) {
+  if (!layers) return '';
+  const hiddenLayers = C.LAYERS.filter(l => !layers.has(l)).map(l => C.LAYER_LABELS[l]);
+  return `These drawings show ${C.visibilityLabel(layers)} only. Not drawn: ${hiddenLayers.join(', ')} (${hiddenN} fitting${hiddenN === 1 ? '' : 's'}), still included in the labour breakdown. Sketches are shared by all layers.`;
+}
+function legacyCells(item) {
+  const ceiling = item.wall === C.CEILING;
+  return [
+    item.id,
+    C.TYPES[item.type].label,
+    ceiling ? `x ${item.fromLeftMm}` : String(item.fromLeftMm),
+    ceiling ? `y ${item.heightMm}` : String(item.heightMm),
+    item.notes || '',
+  ];
+}
+function legacyWallRows(show) {
+  const rows = { A: [], B: [], C: [], D: [], ceiling: [] };
   for (const item of job.items) {
     if (!show(item)) continue;
-    if (item.wall === C.CEILING) counts.ceiling += 1;
-    else if (Object.prototype.hasOwnProperty.call(counts, item.wall)) counts[item.wall] += 1;
+    const cells = legacyCells(item);
+    if (item.wall === C.CEILING) rows.ceiling.push(cells);
+    else if (Object.prototype.hasOwnProperty.call(rows, item.wall)) rows[item.wall].push(cells);
   }
-  return counts;
+  return rows;
 }
 function buildPrintPack(includeInk = true, layers = null, sheetChoice = null) {
   if (window.__SURFACE_TEST__ && window.__SURFACE_TEST__.printIncludeInk === false) includeInk = false;
@@ -3486,8 +3505,8 @@ function buildLegacyPrintPack(includeInk = true, layers = null) {
   pack.innerHTML = '';
   const show = layers ? (it) => layers.has(C.layerOf(it)) : () => true;
   const drawScope = layers ? `Drawings: ${C.visibilityLabel(layers)} only` : 'All layers';
-  const hiddenLayers = layers ? C.LAYERS.filter(l => !layers.has(l)).map(l => C.LAYER_LABELS[l]) : [];
   const hiddenN = job.items.filter(it => !show(it)).length;
+  const scopeText = printScopeText(layers, hiddenN);
   const dims = roomMm();
   const dateStr = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
   const savedStr = job.savedAt ? `saved ${new Date(job.savedAt).toLocaleString('en-GB')}` : 'not yet saved';
@@ -3500,9 +3519,8 @@ function buildLegacyPrintPack(includeInk = true, layers = null) {
     return p;
   };
   const scopeNote = (page) => {
-    if (!layers) return;
-    page.appendChild(el('p', { class: 'print-scope' },
-      `These drawings show ${C.visibilityLabel(layers)} only. Not drawn: ${hiddenLayers.join(', ')} (${hiddenN} fitting${hiddenN === 1 ? '' : 's'}), still included in the labour breakdown. Sketches are shared by all layers.`));
+    if (!scopeText) return;
+    page.appendChild(el('p', { class: 'print-scope' }, scopeText));
   };
   const svgFor = (viewName) => {
     const svg = document.createElementNS(NS, 'svg');
@@ -3544,7 +3562,7 @@ function buildLegacyPrintPack(includeInk = true, layers = null) {
   p1.appendChild(el('p', {}, job.jobNotes || '(no job notes)'));
 
   const onWall = (wall) => job.items.filter((item) => item.wall === wall && show(item));
-  for (const spec of Print.planLegacyWalls(legacyWallCounts(show), !!layers)) {
+  for (const spec of Print.planLegacyWalls(legacyWallRows(show), scopeText)) {
     const page = mkPage(drawScope);
     page.classList.add('legacy-walls');
     scopeNote(page);
@@ -3557,7 +3575,7 @@ function buildLegacyPrintPack(includeInk = true, layers = null) {
       if (block.svg) {
         page.appendChild(el('h2', {}, layers ? `Wall ${block.wall} — ${C.visibilityLabel(layers)} only` : `Wall ${block.wall}`));
         page.appendChild(svgFor(block.wall));
-      } else page.appendChild(el('h2', {}, 'Continued'));
+      } else page.appendChild(el('h2', {}, `Wall ${block.wall} (continued)`));
       page.appendChild(fittingTable(onWall(block.wall).slice(block.from, block.to)));
     }
   }
@@ -3571,8 +3589,8 @@ function buildZonePrintPack(includeInk, layers, choice) {
   pack.innerHTML = '';
   const show = layers ? (it) => layers.has(C.layerOf(it)) : () => true;
   const drawScope = layers ? `Drawings: ${C.visibilityLabel(layers)} only` : 'All layers';
-  const hiddenLayers = layers ? C.LAYERS.filter(l => !layers.has(l)).map(l => C.LAYER_LABELS[l]) : [];
   const hiddenN = job.items.filter(it => !show(it)).length;
+  const scopeText = printScopeText(layers, hiddenN);
   const dims = roomMm();
   const dateStr = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
   const savedStr = job.savedAt ? `saved ${new Date(job.savedAt).toLocaleString('en-GB')}` : 'not yet saved';
@@ -3586,9 +3604,8 @@ function buildZonePrintPack(includeInk, layers, choice) {
     return p;
   };
   const scopeNote = (page) => {
-    if (!layers) return;
-    page.appendChild(el('p', { class: 'print-scope' },
-      `These drawings show ${C.visibilityLabel(layers)} only. Not drawn: ${hiddenLayers.join(', ')} (${hiddenN} fitting${hiddenN === 1 ? '' : 's'}), still included in the labour breakdown. Sketches are shared by all layers.`));
+    if (!scopeText) return;
+    page.appendChild(el('p', { class: 'print-scope' }, scopeText));
   };
 
   const overview = mkPage(drawScope);
@@ -3710,7 +3727,9 @@ function openPrint() {
   const refreshCount = () => {
     if (wholeBox.checked && Print.useLegacyPack(job)) {
       const legacyShow = shownR.checked ? (item) => chosen.has(C.layerOf(item)) : () => true;
-      const pages = Print.legacyPageCount(legacyWallCounts(legacyShow), shownR.checked);
+      const hiddenN = shownR.checked ? job.items.filter((item) => !chosen.has(C.layerOf(item))).length : 0;
+      const scopeText = shownR.checked ? printScopeText(chosen, hiddenN) : '';
+      const pages = Print.legacyPageCount(legacyWallRows(legacyShow), scopeText);
       countEl.textContent = Print.countLine(pages, 0);
       return;
     }
