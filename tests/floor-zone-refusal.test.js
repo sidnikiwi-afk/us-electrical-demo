@@ -56,7 +56,7 @@ test('a disguised v1 backup is refused and a v1 archive upgrades without writing
   const listed = jobs.scan();
   const text = buildArchive(listed, '2026-10-12T00:00:00.000Z').text;
   assert.equal(JSON.parse(text).v, 2);
-  assert.equal(BUILD, 'surface-proto-v15-floor-routes-20261013');
+  assert.equal(BUILD, 'surface-proto-v16-floor-print-20261013');
   for (let i = 0; i < storage.length; i++) {
     const key = storage.key(i);
     if (String(key).startsWith('surface.jobs.v1.') || key === 'surface.job.v1') {

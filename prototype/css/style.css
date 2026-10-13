@@ -72,6 +72,12 @@ button:disabled { opacity: .4; cursor: default; }
 .field-note { font-size: 13px; color: #555; margin: 4px 0 0; }
 .print-choice { display: flex; align-items: center; gap: 10px; min-height: 44px; margin: 4px 0; }
 .print-choice input { width: 22px; height: 22px; margin: 0; flex: 0 0 auto; }
+.modal .print-sheets { min-inline-size: 0; width: 100%; box-sizing: border-box; border: 1px solid #888; border-radius: 8px; margin: 12px 0 0; padding: 8px 10px 10px; }
+.modal .print-sheets legend { font-weight: 700; padding: 0 4px; }
+.modal .print-sheets .print-choice { display: flex; align-items: center; gap: 10px; min-height: 44px; margin: 4px 0; font-weight: 400; scroll-margin: 8px 0 88px; }
+.modal .print-sheets .print-choice span { flex: 1; min-width: 0; }
+.modal .print-sheets .print-choice input { width: 44px; height: 44px; margin: 0; flex: 0 0 auto; scroll-margin: 8px 0 88px; }
+.print-sheet-count { margin: 8px 0 0; font-size: 14px; }
 #quote-bar .q-scope { font-weight: 700; }
 
 #inspector { width: 320px; border-left: 1px solid #ccc; background: #fff; padding: 12px; overflow-y: auto; }
@@ -132,20 +138,30 @@ button.q-chip { border: 0; font: inherit; color: inherit; cursor: pointer; }
 /* The toast has no actions, so taps and pen strokes pass through to what is underneath. */
 #toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 64px; background: #23324d; color: #fff; padding: 10px 18px; border-radius: 24px; z-index: 60; font-size: 15px; max-width: 80vw; pointer-events: none; }
 
-/* Print pack: app chrome hidden, black-and-white safe. */
-#print-pack { display: none; }
+/* Print pack: kept in layout so its text can be read, but invisible on screen.
+   Print media shows it and lets long tables break onto the next sheet. */
+#print-pack { position: fixed; left: 0; top: 0; width: 210mm; max-height: 100vh; overflow: hidden; opacity: 0; pointer-events: none; z-index: -1; }
 @media print {
   #app, #start, #toast, #modal-root { display: none !important; }
-  #print-pack { display: block; }
-  #print-pack .page { page-break-after: always; border-top: 2px solid #000; padding-top: 6px; margin-bottom: 12px; }
+  #print-pack { display: block; position: static; width: auto; max-height: none; overflow: visible; opacity: 1; z-index: auto; pointer-events: auto; }
+  #print-pack .page { page-break-after: always; break-after: page; border-top: 2px solid #000; padding-top: 6px; margin-bottom: 12px; overflow: visible; }
   #print-pack .print-header { display: flex; justify-content: space-between; font-size: 9.5pt; border-bottom: 1px solid #000; }
   #print-pack h2 { font-size: 11pt; margin: 8px 0 4px; }
-  #print-pack table { width: 100%; border-collapse: collapse; font-size: 9pt; }
+  #print-pack table { width: 100%; border-collapse: collapse; font-size: 9pt; break-inside: auto; page-break-inside: auto; }
+  #print-pack tr { break-inside: avoid; page-break-inside: avoid; }
+  #print-pack thead { display: table-header-group; }
   #print-pack th, #print-pack td { border: 1px solid #000; padding: 3px 5px; text-align: left; }
   #print-pack svg { max-width: 100%; height: auto; }
-  /* wall pages carry two wall drawings plus their tables: cap the drawings so
-     each .page fits one A4 sheet instead of spilling onto extra sheets */
-  #print-pack .page:nth-child(2) svg, #print-pack .page:nth-child(3) svg { max-height: 72mm; width: auto; }
+  #print-pack .print-key { max-width: 70mm; }
+  /* Zone pack: each numbered page must fit one A4 landscape sheet, so cap the
+     drawings by height as the legacy wall pages do. Width follows the ratio. */
+  /* the floor plan on page 1 of either pack, so its notes and footer stay on the same sheet */
+  #print-pack .page:first-child > svg { max-height: 85mm; width: auto; }
+  #print-pack .wall-sheet svg { width: auto; }
+  #print-pack .wall-sheet .print-key { max-height: 30mm; }
+  #print-pack .wall-sheet .print-elevation { max-height: 80mm; }
+  /* Legacy wall pages carry two drawings: cap them so the page stays one sheet. */
+  #print-pack .legacy-walls svg { max-height: 72mm; width: auto; }
   #print-pack .disclaimer { font-size: 9pt; font-style: italic; margin-top: 8px; }
   #print-pack .print-scope { font-size: 9.5pt; font-weight: 600; border: 1px solid #000; padding: 3px 6px; margin: 4px 0; }
 }

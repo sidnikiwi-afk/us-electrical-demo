@@ -6,8 +6,9 @@ import * as V1 from './jobs.js';
 import * as F from './floor-zones.js';
 import * as Walls from './floor-walls.js';
 import * as Routes from './floor-routes.js';
+import * as Print from './floor-print.js';
 
-const BUILD = 'surface-proto-v15-floor-routes-20261013';
+const BUILD = 'surface-proto-v16-floor-print-20261013';
 const CONTAINMENT_WARNING = "Containment isn't priced or measured in this version.";
 const buildMixed = BUILD !== C.BUILD || BUILD !== J.BUILD;
 
@@ -3118,10 +3119,255 @@ function downloadBackup() {
 function downloadCsv() { download(`${jobSlug()}-labour.csv`, C.jobCsv(job), 'text/csv'); }
 
 // ---- Print pack -----------------------------------------------------------------
-// layers: null prints the whole job (default). A Set of layer ids limits the
-// drawing pages and their fitting lists to those layers; the labour page always
-// covers the whole job. Either way the job itself is never copied or changed.
-function buildPrintPack(includeInk = true, layers = null) {
+// layers: null prints every fitting (default). A Set limits the drawings and
+// their tables; the labour page always covers the whole job. sheetChoice null
+// means Whole floor, which is also what the browser print menu uses.
+// The job, selection, layers and history are not written.
+function printLegend() {
+  const legend = el('p', { style: 'font-size:9.5pt', 'data-testid': 'print-legend' });
+  legend.textContent = Object.values(C.TYPES).map(t => `${t.symbol} = ${t.label}`).join(' · ')
+    + ' · downlights shown dashed on the ceiling · T trunking (solid band), C conduit (dashed line). '
+    + CONTAINMENT_WARNING;
+  return legend;
+}
+function fittingTable(items, ceilingCoords = false) {
+  const t = el('table');
+  const head = el('tr');
+  const cols = ceilingCoords ? ['ID', 'Type', 'x (mm)', 'y (mm)', 'Notes'] : ['ID', 'Type', 'From left (mm)', 'Height (mm)', 'Notes'];
+  for (const h of cols) head.appendChild(el('th', {}, h));
+  const thead = el('thead');
+  thead.appendChild(head);
+  const body = el('tbody');
+  for (const it of items) {
+    const tr = el('tr');
+    tr.append(el('td', {}, it.id), el('td', {}, C.TYPES[it.type].label),
+      el('td', {}, it.wall === C.CEILING ? `x ${it.fromLeftMm}` : String(it.fromLeftMm)),
+      el('td', {}, it.wall === C.CEILING ? `y ${it.heightMm}` : String(it.heightMm)),
+      el('td', {}, it.notes || ''));
+    body.appendChild(tr);
+  }
+  t.append(thead, body);
+  return t;
+}
+function appendLabour(page, layers, hiddenN) {
+  page.appendChild(el('h2', {}, 'Labour breakdown — whole job, all layers'));
+  if (layers) page.appendChild(el('p', { class: 'print-scope' }, `This page covers every fitting on every layer, including the ${hiddenN} not drawn on the earlier pages.`));
+  const bd = C.breakdown(job);
+  const t = el('table');
+  const head = el('tr');
+  for (const h of ['Work type', 'Qty', 'Rate', 'Line total', 'Status']) head.appendChild(el('th', {}, h));
+  const thead = el('thead');
+  thead.appendChild(head);
+  const body = el('tbody');
+  for (const r of bd.rows) {
+    const tr = el('tr');
+    tr.append(el('td', {}, r.label), el('td', {}, String(r.qty)),
+      el('td', {}, r.ratePence === null ? '—' : C.formatPence(r.ratePence)),
+      el('td', {}, r.linePence === null ? '—' : C.formatPence(r.linePence)),
+      el('td', {}, r.status));
+    body.appendChild(tr);
+  }
+  if (bd.unknownQty) {
+    const tr = el('tr');
+    tr.append(el('td', {}, C.TYPES.unknown.label), el('td', {}, String(bd.unknownQty)), el('td', {}, '—'), el('td', {}, '—'), el('td', {}, 'unpriced'));
+    body.appendChild(tr);
+  }
+  if (bd.existingQty) {
+    const tr = el('tr');
+    tr.append(el('td', {}, C.TYPES.existing.label), el('td', {}, String(bd.existingQty)), el('td', {}, '—'), el('td', {}, '—'), el('td', {}, 'excluded — no work'));
+    body.appendChild(tr);
+  }
+  t.append(thead, body);
+  page.appendChild(t);
+  page.appendChild(el('p', {}, bd.complete ? `Total ${C.formatPence(bd.totalPence)}` : `Total so far ${C.formatPence(bd.totalPence)} — incomplete, ${C.unpricedPhrase(bd.unpricedCount)}`));
+  page.appendChild(el('p', { class: 'disclaimer' }, 'Prototype with example labour rates only. Not a quotation, electrical design or installation advice. Cable and material costs are not included.'));
+  page.appendChild(el('p', { class: 'disclaimer' }, 'Tested with simulated pen and touch. Not yet tried on a real Surface; palm rejection unverified.'));
+}
+function stampPrintFooters(pack) {
+  const pages = pack.querySelectorAll('.page');
+  pages.forEach((p, i) => p.appendChild(el('p', { class: 'print-footer', style: 'font-size:9pt;text-align:right' }, `Page ${i + 1} of ${pages.length}`)));
+}
+function fittingsForSheet(sheet, show) {
+  return job.items.filter(item => {
+    if (!show(item) || item.wall !== sheet.wall) return false;
+    if (Walls.isWallId(item.wall) && item.face !== sheet.face) return false;
+    return item.fromLeftMm >= sheet.fromMm && item.fromLeftMm <= sheet.toMm;
+  });
+}
+function clipRouteMm(route, sheet) {
+  const a = Math.min(route.startMm, route.endMm);
+  const b = Math.max(route.startMm, route.endMm);
+  const from = Math.max(a, sheet.fromMm);
+  const to = Math.min(b, sheet.toMm);
+  if (to <= from) return null;
+  return [from, to];
+}
+function routesForSheet(sheet) {
+  // Every run on this face is drawn. Print does not read or write the on-screen
+  // containment toggles. Runs stay out of the labour breakdown and the CSV,
+  // which both use C.breakdown / C.jobCsv (fittings only).
+  return routesOf().filter(route => {
+    if (!route || route.wall !== sheet.wall || route.face !== sheet.face) return false;
+    return !!clipRouteMm(route, sheet);
+  });
+}
+function paintPrintRoute(parent, route, x1, y1, x2, y2, testid, extra) {
+  const g = svgEl('g', { 'data-testid': testid, 'data-route': route.id, 'data-type': route.type, ...extra }, parent);
+  if (route.type === 'trunking') {
+    svgEl('line', { x1, y1, x2, y2, stroke: '#7a5200', 'stroke-width': 70 }, g);
+    svgEl('line', { x1, y1, x2, y2, stroke: '#f2b84b', 'stroke-width': 46 }, g);
+  } else {
+    svgEl('line', { x1, y1, x2, y2, stroke: '#1d5fa8', 'stroke-width': 28, 'stroke-dasharray': '90 50' }, g);
+  }
+  const label = svgEl('text', {
+    x: (Number(x1) + Number(x2)) / 2, y: Math.min(Number(y1), Number(y2)) - 80,
+    'text-anchor': 'middle', 'font-size': 180, 'font-weight': '700', fill: '#1a1a1a', 'font-family': 'inherit',
+  }, g);
+  label.textContent = Routes.routeLabel(route);
+  return g;
+}
+function keySegment(sheet, dims) {
+  if (Walls.isWallId(sheet.wall)) {
+    const wall = wallRecord(sheet.wall);
+    if (!wall) return null;
+    const a = Walls.planFromOffset(wall, sheet.face, sheet.fromMm);
+    const b = Walls.planFromOffset(wall, sheet.face, sheet.toMm);
+    if (!a || !b) return null;
+    return { x1: a.x, y1: a.y, x2: b.x, y2: b.y };
+  }
+  return faceMark(sheet, dims);
+}
+function renderPrintKey(sheet, dims, show) {
+  const { W, D } = dims;
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('class', 'print-key');
+  svg.setAttribute('data-testid', 'print-key');
+  svg.setAttribute('viewBox', `-500 -500 ${W + 1000} ${D + 1000}`);
+  svgEl('rect', { x: 0, y: 0, width: W, height: D, fill: '#fff', stroke: '#1a1a1a', 'stroke-width': 25 }, svg);
+  for (const zone of F.zonesOf(job)) {
+    svgEl('rect', {
+      x: zone.x0, y: zone.y0, width: Math.max(0, zone.x1 - zone.x0), height: Math.max(0, zone.y1 - zone.y0),
+      fill: 'rgba(35,50,77,0.08)', stroke: '#7d8da6', 'stroke-width': 18,
+    }, svg);
+  }
+  for (const wall of interiorWalls()) {
+    svgEl('line', { x1: wall.x1, y1: wall.y1, x2: wall.x2, y2: wall.y2, stroke: '#1a1a1a', 'stroke-width': 28 }, svg);
+  }
+  const red = keySegment(sheet, dims);
+  if (red) {
+    svgEl('line', {
+      x1: red.x1, y1: red.y1, x2: red.x2, y2: red.y2,
+      stroke: '#d00000', 'stroke-width': 80, 'data-testid': 'print-key-wall',
+    }, svg);
+  }
+  const nudge = { N: [0, -120], S: [0, 120], E: [120, 0], W: [-120, 0] };
+  for (const route of routesForSheet(sheet)) {
+    const span = clipRouteMm(route, sheet);
+    const wall = Routes.wallGeometry(job, route.wall);
+    if (!span || !wall) continue;
+    const a = Walls.planFromOffset(wall, route.face, span[0]);
+    const b = Walls.planFromOffset(wall, route.face, span[1]);
+    if (!a || !b) continue;
+    const shift = nudge[route.face] || [0, 0];
+    paintPrintRoute(svg, route, a.x + shift[0], a.y + shift[1], b.x + shift[0], b.y + shift[1], 'print-key-route', {
+      'data-plan-x1': String(a.x), 'data-plan-y1': String(a.y), 'data-plan-x2': String(b.x), 'data-plan-y2': String(b.y),
+    });
+  }
+  for (const item of fittingsForSheet(sheet, show)) {
+    const p = planPos(item);
+    const inset = Walls.isWallId(item.wall)
+      ? { N: [0, -260], S: [0, 260], E: [260, 0], W: [-260, 0] }[item.face] || [0, 0]
+      : { A: [0, 260], B: [-260, 0], C: [0, -260], D: [260, 0] }[item.wall] || [0, 0];
+    const g = fittingGlyph(item, p.x + inset[0], p.y + inset[1], item.wall !== 'C');
+    g.setAttribute('data-testid', 'print-key-fitting');
+    g.setAttribute('data-plan-x', String(p.x));
+    g.setAttribute('data-plan-y', String(p.y));
+    g.setAttribute('data-from-left', String(item.fromLeftMm));
+    svg.appendChild(g);
+  }
+  return svg;
+}
+function renderPrintElevation(sheet, dims, show, includeInk) {
+  const H = dims.H;
+  const x0 = sheet.fromMm;
+  const x1 = sheet.toMm;
+  const span = Math.max(1, x1 - x0);
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('class', 'print-elevation');
+  svg.setAttribute('data-testid', 'print-elevation');
+  svg.setAttribute('viewBox', `${x0 - 800} -800 ${span + 1800} ${H + 1600}`);
+  svgEl('rect', { x: x0, y: 0, width: span, height: H, fill: '#fff', stroke: '#1a1a1a', 'stroke-width': 25 }, svg);
+  svgEl('line', { x1: x0, y1: H, x2: x1, y2: H, stroke: '#1a1a1a', 'stroke-width': 40 }, svg);
+  const heightLabel = svgEl('text', {
+    x: x1 + 380, y: H / 2, 'font-size': 240, fill: '#555', 'font-family': 'inherit', 'text-anchor': 'middle',
+    transform: `rotate(-90 ${x1 + 380} ${H / 2})`,
+  }, svg);
+  heightLabel.textContent = `${job.room.heightM.toFixed(2)} m`;
+  for (const mm of [x0, x1]) {
+    svgEl('line', { x1: mm, y1: H, x2: mm, y2: H + 120, stroke: '#23324d', 'stroke-width': 12 }, svg);
+    const tick = svgEl('text', { x: mm, y: H + 280, 'font-size': 160, fill: '#23324d', 'text-anchor': 'middle', 'font-family': 'inherit', 'data-testid': 'print-ruler' }, svg);
+    tick.textContent = `${(mm / 1000).toFixed(2)} m`;
+  }
+  if (x0 > 0) {
+    const c = svgEl('text', { x: x0, y: -80, 'font-size': 180, fill: '#555', 'font-family': 'inherit', 'data-testid': 'print-continues' }, svg);
+    c.textContent = 'Wall continues';
+  }
+  if (x1 < sheet.lengthMm) {
+    const c = svgEl('text', { x: x1, y: -80, 'font-size': 180, fill: '#555', 'text-anchor': 'end', 'font-family': 'inherit', 'data-testid': 'print-continues' }, svg);
+    c.textContent = 'Wall continues';
+  }
+  for (const boundary of sheet.boundaries) {
+    svgEl('line', {
+      x1: boundary.atMm, y1: 0, x2: boundary.atMm, y2: H,
+      stroke: '#1a1a1a', 'stroke-width': 16, 'stroke-dasharray': '70 40',
+      'data-testid': 'print-zone-boundary', 'data-at': String(boundary.atMm),
+    }, svg);
+    const label = svgEl('text', {
+      x: boundary.atMm, y: -80, 'text-anchor': 'middle', 'font-size': 170, fill: '#1a1a1a', 'font-family': 'inherit',
+      'data-testid': 'print-zone-boundary-label',
+    }, svg);
+    label.textContent = boundary.names.join(', ');
+  }
+  for (const item of fittingsForSheet(sheet, show)) {
+    const g = fittingGlyph(item, item.fromLeftMm, H - item.heightMm);
+    g.setAttribute('data-testid', 'print-elevation-fitting');
+    g.setAttribute('data-from-left', String(item.fromLeftMm));
+    g.setAttribute('data-height', String(item.heightMm));
+    svg.appendChild(g);
+  }
+  for (const route of routesForSheet(sheet)) {
+    const spanMm = clipRouteMm(route, sheet);
+    if (!spanMm) continue;
+    const y = H - route.heightMm;
+    paintPrintRoute(svg, route, spanMm[0], y, spanMm[1], y, 'print-elevation-route', {
+      'data-from': String(spanMm[0]), 'data-to': String(spanMm[1]),
+    });
+  }
+  if (includeInk) {
+    const annoKey = sheet.interior ? sheet.view : sheet.wall;
+    for (const s of job.annotations[annoKey] || []) {
+      svgEl('polyline', {
+        points: s.points.map(pt => pt.join(',')).join(' '),
+        fill: 'none', stroke: '#2266cc', 'stroke-width': 25, 'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+      }, svg);
+    }
+  }
+  return svg;
+}
+function drawFullPlan(parent, dims, show) {
+  const savedZone = zoneId;
+  const savedView = view;
+  zoneId = null;
+  view = 'PLAN';
+  try { renderPlan(parent, dims, show); }
+  finally { zoneId = savedZone; view = savedView; }
+}
+function buildPrintPack(includeInk = true, layers = null, sheetChoice = null) {
+  const choice = sheetChoice || { whole: true, zoneIds: [] };
+  if (choice.whole && Print.useLegacyPack(job)) buildLegacyPrintPack(includeInk, layers);
+  else buildZonePrintPack(includeInk, layers, choice);
+}
+function buildLegacyPrintPack(includeInk = true, layers = null) {
   const pack = $('#print-pack');
   pack.innerHTML = '';
   const show = layers ? (it) => layers.has(C.layerOf(it)) : () => true;
@@ -3151,7 +3397,6 @@ function buildPrintPack(includeInk = true, layers = null) {
     if (viewName === 'PLAN') {
       vbW = dims.W + 1600; vbH = dims.D + 1600;
       svg.setAttribute('viewBox', `-800 -800 ${vbW} ${vbH}`);
-      if (!includeInk) job.annotations.PLAN.forEach(() => { });
       const saved = job.annotations.PLAN; if (!includeInk) job.annotations.PLAN = [];
       renderPlan(tmpWorld, dims, show);
       if (!includeInk) job.annotations.PLAN = saved;
@@ -3166,91 +3411,130 @@ function buildPrintPack(includeInk = true, layers = null) {
     while (tmpWorld.firstChild) svg.appendChild(tmpWorld.firstChild);
     return svg;
   };
-  const itemTable = (items, ceilingCoords = false) => {
-    const t = el('table');
-    const head = el('tr');
-    // ceiling fittings store plan x/y, not a mounting height
-    const cols = ceilingCoords ? ['ID', 'Type', 'x (mm)', 'y (mm)', 'Notes'] : ['ID', 'Type', 'From left (mm)', 'Height (mm)', 'Notes'];
-    for (const h of cols) head.appendChild(el('th', {}, h));
-    t.appendChild(head);
-    for (const it of items) {
-      const tr = el('tr');
-      tr.append(el('td', {}, it.id), el('td', {}, C.TYPES[it.type].label),
-        el('td', {}, it.wall === C.CEILING ? `x ${it.fromLeftMm}` : String(it.fromLeftMm)),
-        el('td', {}, it.wall === C.CEILING ? `y ${it.heightMm}` : String(it.heightMm)),
-        el('td', {}, it.notes || ''));
-      t.appendChild(tr);
-    }
-    return t;
-  };
 
-  // Page 1: plan, legend, room, notes
   const p1 = mkPage(drawScope);
   p1.appendChild(el('h2', {}, layers ? `Floor plan — ${C.visibilityLabel(layers)} only` : 'Floor plan — all layers'));
   scopeNote(p1);
   p1.appendChild(svgFor('PLAN'));
-  const legend = el('p', { style: 'font-size:9.5pt' });
-  legend.textContent = Object.values(C.TYPES).map(t => `${t.symbol} = ${t.label}`).join(' · ') + ' · downlights shown dashed on the ceiling · T trunking (solid band), C conduit (dashed line). ' + CONTAINMENT_WARNING;
-  p1.appendChild(legend);
+  p1.appendChild(printLegend());
   p1.appendChild(el('h2', {}, 'Room and job notes'));
   p1.appendChild(el('p', {}, `${job.room.widthM.toFixed(2)} × ${job.room.depthM.toFixed(2)} × ${job.room.heightM.toFixed(2)} m (w × d × h)`));
   p1.appendChild(el('p', {}, job.jobNotes || '(no job notes)'));
 
-  // Pages 2–3: two walls per page
   let page = null;
   C.WALLS.forEach((w, idx) => {
-    if (idx % 2 === 0) { page = mkPage(drawScope); scopeNote(page); }
+    if (idx % 2 === 0) {
+      page = mkPage(drawScope);
+      page.classList.add('legacy-walls');
+      scopeNote(page);
+    }
     page.appendChild(el('h2', {}, layers ? `Wall ${w} — ${C.visibilityLabel(layers)} only` : `Wall ${w}`));
     page.appendChild(svgFor(w));
-    page.appendChild(itemTable(job.items.filter(i => i.wall === w && show(i))));
+    page.appendChild(fittingTable(job.items.filter(i => i.wall === w && show(i))));
   });
-  // ceiling items table appended to wall D page
   const ceil = job.items.filter(i => i.wall === C.CEILING && show(i));
   if (ceil.length) {
     page.appendChild(el('h2', {}, 'Ceiling fittings'));
-    page.appendChild(itemTable(ceil, true));
+    page.appendChild(fittingTable(ceil, true));
   }
 
-  // Last page: labour breakdown, always the whole job
   const pL = mkPage('Whole job, all layers');
-  pL.appendChild(el('h2', {}, 'Labour breakdown — whole job, all layers'));
-  if (layers) pL.appendChild(el('p', { class: 'print-scope' }, `This page covers every fitting on every layer, including the ${hiddenN} not drawn on the earlier pages.`));
-  const bd = C.breakdown(job);
-  const t = el('table');
-  const head = el('tr');
-  for (const h of ['Work type', 'Qty', 'Rate', 'Line total', 'Status']) head.appendChild(el('th', {}, h));
-  t.appendChild(head);
-  for (const r of bd.rows) {
-    const tr = el('tr');
-    tr.append(el('td', {}, r.label), el('td', {}, String(r.qty)),
-      el('td', {}, r.ratePence === null ? '—' : C.formatPence(r.ratePence)),
-      el('td', {}, r.linePence === null ? '—' : C.formatPence(r.linePence)),
-      el('td', {}, r.status));
-    t.appendChild(tr);
-  }
-  if (bd.unknownQty) {
-    const tr = el('tr');
-    tr.append(el('td', {}, C.TYPES.unknown.label), el('td', {}, String(bd.unknownQty)), el('td', {}, '—'), el('td', {}, '—'), el('td', {}, 'unpriced'));
-    t.appendChild(tr);
-  }
-  if (bd.existingQty) {
-    const tr = el('tr');
-    tr.append(el('td', {}, C.TYPES.existing.label), el('td', {}, String(bd.existingQty)), el('td', {}, '—'), el('td', {}, '—'), el('td', {}, 'excluded — no work'));
-    t.appendChild(tr);
-  }
-  pL.appendChild(t);
-  pL.appendChild(el('p', {}, bd.complete ? `Total ${C.formatPence(bd.totalPence)}` : `Total so far ${C.formatPence(bd.totalPence)} — incomplete, ${C.unpricedPhrase(bd.unpricedCount)}`));
-  pL.appendChild(el('p', { class: 'disclaimer' }, 'Prototype with example labour rates only. Not a quotation, electrical design or installation advice. Cable and material costs are not included.'));
-  pL.appendChild(el('p', { class: 'disclaimer' }, 'Tested with simulated pen and touch. Not yet tried on a real Surface; palm rejection unverified.'));
+  appendLabour(pL, layers, hiddenN);
+  stampPrintFooters(pack);
+}
+function buildZonePrintPack(includeInk, layers, choice) {
+  const pack = $('#print-pack');
+  pack.innerHTML = '';
+  const show = layers ? (it) => layers.has(C.layerOf(it)) : () => true;
+  const drawScope = layers ? `Drawings: ${C.visibilityLabel(layers)} only` : 'All layers';
+  const hiddenLayers = layers ? C.LAYERS.filter(l => !layers.has(l)).map(l => C.LAYER_LABELS[l]) : [];
+  const hiddenN = job.items.filter(it => !show(it)).length;
+  const dims = roomMm();
+  const dateStr = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  const savedStr = job.savedAt ? `saved ${new Date(job.savedAt).toLocaleString('en-GB')}` : 'not yet saved';
+  const plan = Print.planSheets(job, choice);
+  const mkPage = (scope) => {
+    const p = el('div', { class: 'page' });
+    const h = el('div', { class: 'print-header' });
+    h.append(el('strong', {}, `${job.name} — prototype, example rates`), el('span', {}, `${scope} · revision ${job.revision} · ${savedStr} · printed ${dateStr}`));
+    p.appendChild(h);
+    pack.appendChild(p);
+    return p;
+  };
+  const scopeNote = (page) => {
+    if (!layers) return;
+    page.appendChild(el('p', { class: 'print-scope' },
+      `These drawings show ${C.visibilityLabel(layers)} only. Not drawn: ${hiddenLayers.join(', ')} (${hiddenN} fitting${hiddenN === 1 ? '' : 's'}), still included in the labour breakdown. Sketches are shared by all layers.`));
+  };
 
-  // page footers
-  const pages = pack.querySelectorAll('.page');
-  pages.forEach((p, i) => p.appendChild(el('p', { style: 'font-size:9pt;text-align:right' }, `Page ${i + 1} of ${pages.length}`)));
+  const overview = mkPage(drawScope);
+  overview.dataset.testid = 'print-overview';
+  overview.appendChild(el('h2', {}, 'Floor overview'));
+  overview.appendChild(el('p', { 'data-testid': 'print-layer-label' }, drawScope));
+  scopeNote(overview);
+  const planSvg = document.createElementNS(NS, 'svg');
+  planSvg.setAttribute('data-testid', 'print-overview-plan');
+  planSvg.setAttribute('viewBox', `-800 -800 ${dims.W + 1600} ${dims.D + 1600}`);
+  const savedPlan = includeInk ? null : job.annotations.PLAN;
+  if (!includeInk) job.annotations.PLAN = [];
+  drawFullPlan(planSvg, dims, show);
+  if (!includeInk) job.annotations.PLAN = savedPlan;
+  overview.appendChild(planSvg);
+  overview.appendChild(printLegend());
+  overview.appendChild(el('p', {}, `${job.room.widthM.toFixed(2)} × ${job.room.depthM.toFixed(2)} × ${job.room.heightM.toFixed(2)} m (w × d × h)`));
+  const zones = F.zonesOf(job);
+  if (zones.length) {
+    const list = el('ol', { 'data-testid': 'print-zones' });
+    for (const zone of zones) {
+      list.appendChild(el('li', {}, `${zone.name}: ${(zone.x0 / 1000).toFixed(2)} to ${(zone.x1 / 1000).toFixed(2)} m from the west, ${(zone.y0 / 1000).toFixed(2)} to ${(zone.y1 / 1000).toFixed(2)} m from the north`));
+    }
+    overview.appendChild(list);
+  } else overview.appendChild(el('p', {}, 'No zones on this floor.'));
+  const routes = routesOf().filter(route => route);
+  if (routes.length) {
+    const list = el('ol', { 'data-testid': 'print-routes' });
+    const side = { N: 'north side', E: 'east side', S: 'south side', W: 'west side' };
+    for (const route of routes) {
+      const where = Walls.isWallId(route.wall) ? `${route.wall} ${side[route.face] || route.face}` : `Wall ${route.wall}`;
+      const kind = route.type === 'conduit' ? 'conduit' : 'trunking';
+      list.appendChild(el('li', {}, `${Routes.routeLabel(route)} ${kind} on ${where}, ${Math.min(route.startMm, route.endMm)} to ${Math.max(route.startMm, route.endMm)} mm at ${route.heightMm} mm`));
+    }
+    overview.appendChild(list);
+  } else overview.appendChild(el('p', {}, 'No containment runs on this floor.'));
+  overview.appendChild(el('p', {}, job.jobNotes || '(no job notes)'));
+  // Ceiling fittings stay listed on the overview. Wall sheets do not repeat them.
+  // A layer filter omits hidden rows here; appendLabour still prices every fitting.
+  const ceil = job.items.filter(item => item.wall === C.CEILING && show(item));
+  if (ceil.length) {
+    overview.appendChild(el('h2', {}, 'Ceiling fittings'));
+    overview.appendChild(fittingTable(ceil, true));
+  }
+
+  for (const sheet of plan.sheets) {
+    const page = mkPage(drawScope);
+    page.classList.add('wall-sheet');
+    page.dataset.testid = 'print-wall-sheet';
+    page.dataset.wall = sheet.wall;
+    page.dataset.face = sheet.face;
+    page.appendChild(el('h2', {}, sheet.title));
+    page.appendChild(el('p', { 'data-testid': 'print-subtitle' }, sheet.subtitle));
+    page.appendChild(el('p', { 'data-testid': 'print-layer-label' }, drawScope));
+    scopeNote(page);
+    page.appendChild(renderPrintKey(sheet, dims, show));
+    page.appendChild(printLegend());
+    page.appendChild(renderPrintElevation(sheet, dims, show, includeInk));
+    page.appendChild(fittingTable(fittingsForSheet(sheet, show)));
+  }
+
+  const labour = mkPage('Whole job, all layers');
+  labour.dataset.testid = 'print-labour';
+  appendLabour(labour, layers, hiddenN);
+  stampPrintFooters(pack);
 }
 
 function openPrint() {
   const box = el('div');
-  box.appendChild(el('p', {}, 'Prints the plan, all four wall views with fittings, and the labour breakdown.'));
+  box.appendChild(el('p', {}, 'Prints a floor overview, the wall sheets you tick, and the labour breakdown.'));
   const choice = (value, text, checked, disabled) => {
     const r = el('input', { type: 'radio', name: 'print-scope', value, 'data-testid': `print-scope-${value}` });
     r.checked = checked; r.disabled = disabled;
@@ -3266,18 +3550,59 @@ function openPrint() {
       ? `Drawings: shown layers only (${C.visibilityLabel(shownLayers)})`
       : 'Drawings: shown layers only (hide a layer first to use this)',
     false, !canFilter);
-  box.appendChild(el('p', { style: 'font-size:14px' }, 'The labour breakdown always covers the whole job, all layers.'));
-  // Snapshot now so the printed pages match what was chosen here.
+  box.appendChild(el('p', { style: 'font-size:14px', 'data-testid': 'print-breakdown-note' }, 'The labour breakdown always covers the whole job, all layers.'));
+  // UX §11: fieldset group under the layer choices and the whole-job note.
+  // Whole floor scope ticks Whole floor. A zone scope ticks that zone only.
+  // Nothing ticked is allowed and prints the overview plus the breakdown.
+  const scoped = activeZone();
+  const sheets = el('fieldset', { class: 'print-sheets', 'data-testid': 'print-sheets' });
+  sheets.appendChild(el('legend', {}, 'Wall sheets'));
+  const wholeBox = el('input', { type: 'checkbox', 'data-testid': 'print-whole' });
+  wholeBox.checked = !scoped;
+  const wholeLbl = el('label', { class: 'print-choice' });
+  wholeLbl.append(wholeBox, el('span', {}, 'Whole floor (every wall, full length)'));
+  sheets.appendChild(wholeLbl);
+  const zoneBoxes = [];
+  for (const zone of F.zonesOf(job)) {
+    const input = el('input', { type: 'checkbox', value: zone.id, 'data-testid': `print-zone-${zone.id}` });
+    input.checked = !!(scoped && scoped.id === zone.id);
+    const lbl = el('label', { class: 'print-choice' });
+    lbl.append(input, el('span', {}, zone.name));
+    sheets.appendChild(lbl);
+    zoneBoxes.push(input);
+  }
+  const countEl = el('p', { class: 'print-sheet-count', 'data-testid': 'print-sheet-count' });
+  sheets.appendChild(countEl);
+  const tickedIds = () => zoneBoxes.filter(input => input.checked).map(input => input.value);
+  const refreshCount = () => {
+    const plan = Print.planSheets(job, { whole: wholeBox.checked, zoneIds: wholeBox.checked ? [] : tickedIds() });
+    countEl.textContent = Print.countLine(plan.sheets.length, plan.sharedWalls);
+  };
+  wholeBox.addEventListener('change', () => {
+    if (wholeBox.checked) zoneBoxes.forEach(input => { input.checked = false; });
+    refreshCount();
+  });
+  for (const input of zoneBoxes) {
+    input.addEventListener('change', () => {
+      if (input.checked) wholeBox.checked = false;
+      refreshCount();
+    });
+  }
+  refreshCount();
+  box.appendChild(sheets);
+  // Snapshot layers now so the printed pages match what was chosen here.
+  // Wall-sheet ticks are read at click, before the dialog is removed.
   const chosen = new Set(shownLayers);
   modal('Print', [box], [
     { label: 'Cancel', fn: closeModal },
     { label: 'Print', class: 'btn-primary', testid: 'print-go', fn: () => {
       const layers = shownR.checked ? chosen : null;
+      const sheetChoice = { whole: wholeBox.checked, zoneIds: wholeBox.checked ? [] : tickedIds() };
       closeModal();
       // wait for the debounced save first, so the header shows a real saved
       // time (bounded: never blocks printing for more than 2 s)
       const t0 = Date.now();
-      const go = () => { printFromDialog = true; buildPrintPack(true, layers); setTimeout(() => window.print(), 50); };
+      const go = () => { printFromDialog = true; buildPrintPack(true, layers, sheetChoice); setTimeout(() => window.print(), 50); };
       const tick = () => (job.savedAt || Date.now() - t0 > 2000) ? go() : setTimeout(tick, 100);
       tick();
     } },
