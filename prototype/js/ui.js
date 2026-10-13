@@ -4,9 +4,13 @@ import * as C from './core.js';
 import * as J from './jobs-v2.js';
 import * as V1 from './jobs.js';
 import * as F from './floor-zones.js';
+import * as Walls from './floor-walls.js';
+import * as Routes from './floor-routes.js';
+import * as Print from './floor-print.js';
 
-const BUILD = 'surface-proto-v13-floor-zones-20261012';
-const buildMixed = BUILD !== C.BUILD || BUILD !== J.BUILD;
+const BUILD = 'surface-proto-v17-floor-final-20261013';
+const CONTAINMENT_WARNING = "Containment isn't priced or measured in this version.";
+const buildMixed = BUILD !== C.BUILD || BUILD !== J.BUILD || BUILD !== F.BUILD || BUILD !== Walls.BUILD || BUILD !== Routes.BUILD || BUILD !== Print.BUILD;
 
 const NS = 'http://www.w3.org/2000/svg';
 
@@ -50,7 +54,21 @@ let zoneId = null;              // scope: null is the whole floor
 let zoneTool = null;            // { first: {x,y}|null } while Add zone is waiting for taps
 let zoneGesture = null;         // pointer that started a zone tap; committed on lift
 let zoneEdgeDrag = null;        // one edge handle; the job changes on lift only
+let wallTool = null;            // { first: {x,y}|null, hover } while Add wall is waiting
+let wallGesture = null;         // pointer that started a wall tap; committed on lift
+let wallDrag = null;            // end handle; the job changes on lift only
+let routeTool = null;          // { type, first: {offset,height}|null, hover } on a face
+let routeGesture = null;       // pointer that started a run tap; committed on lift
+let routeDrag = null;          // end handle; the job changes on lift only
+let selectedRoute = null;      // 'R1' while a run is inspected
+let showContainment = { trunking: true, conduit: true }; // view state, never saved
+let selectedWall = null;        // 'A'..'D' or 'W1' while a wall is inspected
+let paletteView = null;
+let highlightIds = null;        // fittings shown after "Show them"
+let zoneNotesOpen = false;
 let lastZoneDetails = null;
+let lastWallDetails = null;
+let lastRouteDetails = null;
 // "Set height for several" sub-state of the Select tool: multiIds is null when
 // off and an array of fitting IDs when on. multiDraft keeps the typed height
 // across panel rebuilds; multiPending holds a tap awaiting the 12-px threshold.
@@ -183,12 +201,13 @@ function toast(msg, ms = 2600) {
 // ---- History (undo/redo) ---------------------------------------------------
 function snapshot() { return JSON.stringify(job); }
 function commit(mutate, opts = {}) {
-  // Exception-safe: a mutation that throws (e.g. item cap) changes nothing and
-  // leaves no empty undo frame. Zone edits pass exact so the refusal is the
-  // validator sentence on its own.
+  // A throw restores the snapshot taken before the attempt. The refusal is
+  // byte for byte the previous job and adds no undo frame. Zone and wall
+  // edits pass exact so the refusal is the validator sentence on its own.
   const pre = snapshot();
   try { mutate(); }
   catch (err) {
+    try { job = JSON.parse(pre); } catch { /* the snapshot is our own JSON */ }
     const msg = err && err.message ? err.message : 'That change was not applied.';
     toast(opts.exact ? msg : `Change not applied — ${msg}`);
     renderAll();
@@ -930,6 +949,11 @@ function roomMm() {
 function planPos(item) {
   const { W, D } = roomMm();
   const f = item.fromLeftMm;
+  if (Walls.isWallId(item.wall)) {
+    const wall = wallRecord(item.wall);
+    const plan = wall && item.face ? Walls.planFromOffset(wall, item.face, f) : null;
+    return plan || { x: f, y: 0 };
+  }
   switch (item.wall) {
     case 'A': return { x: f, y: 0 };
     case 'B': return { x: W, y: f };
@@ -937,6 +961,12 @@ function planPos(item) {
     case 'D': return { x: 0, y: D - f };
     default: return { x: item.fromLeftMm, y: item.heightMm }; // ceiling: (x across width, y across depth)
   }
+}
+function wallRecord(id) {
+  return (job && job.floor && Array.isArray(job.floor.walls) ? job.floor.walls : []).find(w => w.id === id) || null;
+}
+function interiorWalls() {
+  return F.wallsOf(job);
 }
 // Inverse: plan point + chosen wall → fromLeft. Returns null if not near that wall.
 function wallParamsFromPlan(x, y, wall) {
@@ -957,6 +987,45 @@ function nearestWallFromPlan(x, y) {
   // perpendicular wall via a negative distance.
   const dists = { A: Math.abs(y), B: Math.abs(W - x), C: Math.abs(D - y), D: Math.abs(x) };
   return Object.keys(dists).reduce((a, b) => dists[a] <= dists[b] ? a : b);
+}
+// Nearest face within the existing plan threshold. The face is the side the
+// tap landed on. Exterior walls only offer their inner face. A tap past the
+// end of an interior wall does not jump onto that wall.
+function nearestFaceFromPlan(x, y) {
+  const { W, D } = roomMm();
+  const NEAR = Math.max(300, Math.round(Math.min(W, D) * 0.12));
+  let best = null;
+  const take = (cand) => {
+    if (!cand || cand.dist > NEAR) return;
+    if (!best || cand.dist < best.dist) best = cand;
+  };
+  const exterior = [
+    { wall: 'A', dist: Math.abs(y), ok: y <= NEAR, fromLeft: Math.round(x) },
+    { wall: 'B', dist: Math.abs(W - x), ok: x >= W - NEAR, fromLeft: Math.round(y) },
+    { wall: 'C', dist: Math.abs(D - y), ok: y >= D - NEAR, fromLeft: Math.round(W - x) },
+    { wall: 'D', dist: Math.abs(x), ok: x <= NEAR, fromLeft: Math.round(D - y) },
+  ];
+  for (const edge of exterior) {
+    if (!edge.ok) continue;
+    take({ wall: edge.wall, face: null, dist: edge.dist, fromLeft: edge.fromLeft });
+  }
+  for (const wall of interiorWalls()) {
+    const axis = Walls.wallAxis(wall);
+    if (axis === 'H') {
+      if (x < wall.x1 || x > wall.x2) continue;
+      const dist = Math.abs(y - wall.y1);
+      const face = y < wall.y1 ? 'N' : 'S';
+      const fromLeft = face === 'S' ? x - wall.x1 : wall.x2 - x;
+      take({ wall: wall.id, face, dist, fromLeft: Math.round(fromLeft) });
+    } else if (axis === 'V') {
+      if (y < wall.y1 || y > wall.y2) continue;
+      const dist = Math.abs(x - wall.x1);
+      const face = x > wall.x1 ? 'E' : 'W';
+      const fromLeft = face === 'W' ? y - wall.y1 : wall.y2 - y;
+      take({ wall: wall.id, face, dist, fromLeft: Math.round(fromLeft) });
+    }
+  }
+  return best;
 }
 
 // ---- Drawing: plan and wall views --------------------------------------------
@@ -1012,7 +1081,7 @@ function renderPlan(content, { W, D }, show = isShown) {
       class: 'zone-rect', 'data-zone': z.id,
     }, content);
     if (!on) continue;
-    for (const face of F.positiveFaces(job.room, z)) {
+    for (const face of F.zoneTouchingFaces(job, z)) {
       const seg = faceMark(face, { W, D });
       if (!seg) continue;
       svgEl('line', {
@@ -1046,6 +1115,18 @@ function renderPlan(content, { W, D }, show = isShown) {
   if (zoneTool && zoneTool.first) {
     svgEl('circle', { cx: zoneTool.first.x, cy: zoneTool.first.y, r: 70, fill: '#23324d' }, content);
   }
+  drawInteriorWalls(content);
+  drawPlanRoutes(content);
+  if (wallTool && wallTool.first) {
+    svgEl('circle', { cx: wallTool.first.x, cy: wallTool.first.y, r: 70, fill: '#23324d' }, content);
+    const aim = wallTool.hover ? lockedWall(wallTool.first, snapPlan(wallTool.hover)) : null;
+    if (aim) {
+      svgEl('line', {
+        x1: aim.x1, y1: aim.y1, x2: aim.x2, y2: aim.y2,
+        stroke: '#23324d', 'stroke-width': 28, 'stroke-dasharray': '80 50', 'pointer-events': 'none',
+      }, content);
+    }
+  }
   // wall labels: one label per wall, each with its length
   const dims = [
     { x: W / 2, y: -260, text: `Wall A · ${job.room.widthM.toFixed(2)} m`, wall: 'A' },
@@ -1074,8 +1155,10 @@ function renderPlan(content, { W, D }, show = isShown) {
       continue;
     }
     const p = planPos(item);
-    // sit just inside the wall line
-    const inset = { A: [0, 260], B: [-260, 0], C: [0, -260], D: [260, 0] }[item.wall];
+    // sit just inside the wall line, on the side the fitting belongs to
+    const inset = Walls.isWallId(item.wall)
+      ? { N: [0, -260], S: [0, 260], E: [260, 0], W: [-260, 0] }[item.face] || [0, 0]
+      : { A: [0, 260], B: [-260, 0], C: [0, -260], D: [260, 0] }[item.wall];
     const gx = p.x + inset[0], gy = p.y + inset[1];
     // default: label on the room side of the wall line (A: below, C: above)
     let below = item.wall !== 'C';
@@ -1090,13 +1173,29 @@ function renderPlan(content, { W, D }, show = isShown) {
   return { margin: 500 };
 }
 
+function scopeFaces() {
+  const z = activeZone();
+  return z ? F.zoneTouchingFaces(job, z) : F.wholeFloorFaces(job);
+}
+function faceForView(viewKey) {
+  return scopeFaces().find(face => face.view === viewKey) || null;
+}
 function zoneFaceFor(wall) {
   if (!zoneId || !job) return null;
   const z = F.zoneById(job, zoneId);
   if (!z) return null;
-  return F.positiveFaces(job.room, z).find(face => face.wall === wall) || null;
+  return F.zoneTouchingFaces(job, z).find(face => face.view === wall || (face.wall === wall && !face.interior)) || null;
 }
 function faceMark(face, { W, D }) {
+  if (face.interior) {
+    const wall = wallRecord(face.wall);
+    if (!wall) return null;
+    const a = Walls.planFromOffset(wall, face.face, face.fromMm);
+    const b = Walls.planFromOffset(wall, face.face, face.toMm);
+    if (!a || !b) return null;
+    const nudge = { N: [0, -50], S: [0, 50], E: [50, 0], W: [-50, 0] }[face.face] || [0, 0];
+    return { x1: a.x + nudge[0], y1: a.y + nudge[1], x2: b.x + nudge[0], y2: b.y + nudge[1] };
+  }
   if (face.wall === 'A') return { x1: face.fromMm, y1: 0, x2: face.toMm, y2: 0 };
   if (face.wall === 'B') return { x1: W, y1: face.fromMm, x2: W, y2: face.toMm };
   if (face.wall === 'C') return { x1: W - face.toMm, y1: D, x2: W - face.fromMm, y2: D };
@@ -1110,8 +1209,280 @@ function selectionVisible(id, nextZoneId) {
   const z = F.zoneById(job, nextZoneId);
   if (!z) return false;
   if (it.wall === C.CEILING) return it.fromLeftMm >= z.x0 && it.fromLeftMm <= z.x1 && it.heightMm >= z.y0 && it.heightMm <= z.y1;
-  const face = F.positiveFaces(job.room, z).find(f => f.wall === it.wall);
-  return !!(face && F.fittingOnFace(it, face));
+  return F.zoneTouchingFaces(job, z).some(face => F.fittingOnFace(it, face));
+}
+function drawInteriorWalls(content) {
+  if (!job || !job.floor) return;
+  const hit = screenMm(16);
+  const showHandles = mode === 'select' && content.ownerSVGElement && content.ownerSVGElement.id === 'canvas';
+  for (const src of interiorWalls()) {
+    const live = wallDrag && wallDrag.wallId === src.id && wallDrag.live ? wallDrag.live : src;
+    const on = selectedWall === src.id;
+    svgEl('line', {
+      x1: live.x1, y1: live.y1, x2: live.x2, y2: live.y2,
+      stroke: 'transparent', 'stroke-width': hit, class: 'wall-hit',
+      'data-wall': src.id, 'data-testid': `wall-${src.id}`,
+    }, content);
+    svgEl('line', {
+      x1: live.x1, y1: live.y1, x2: live.x2, y2: live.y2,
+      stroke: on ? '#23324d' : '#1a1a1a', 'stroke-width': on ? 48 : 28, 'pointer-events': 'none',
+    }, content);
+    const label = svgEl('text', {
+      x: (live.x1 + live.x2) / 2, y: (live.y1 + live.y2) / 2 - 80,
+      'text-anchor': 'middle', 'font-size': 200, fill: '#23324d', 'font-family': 'inherit', 'pointer-events': 'none',
+    }, content);
+    label.textContent = `${src.id} · ${(Walls.wallLength(live) / 1000).toFixed(2)} m`;
+    if (!on || !showHandles) continue;
+    const handle = screenMm(44);
+    for (const which of ['start', 'end']) {
+      const at = which === 'start' ? { x: live.x1, y: live.y1 } : { x: live.x2, y: live.y2 };
+      svgEl('rect', {
+        x: at.x - handle / 2, y: at.y - handle / 2, width: handle, height: handle,
+        fill: 'transparent', stroke: 'none', class: 'wall-handle',
+        'data-which': which, 'data-wall': src.id, 'data-testid': `wall-handle-${which}`,
+      }, content);
+      svgEl('rect', {
+        x: at.x - 50, y: at.y - 50, width: 100, height: 100,
+        fill: '#fff', stroke: '#23324d', 'stroke-width': 16, 'pointer-events': 'none',
+      }, content);
+    }
+  }
+  if (showHandles) {
+    const { W, D } = roomMm();
+    const edges = [
+      { id: 'A', x1: 0, y1: 0, x2: W, y2: 0 },
+      { id: 'B', x1: W, y1: 0, x2: W, y2: D },
+      { id: 'C', x1: 0, y1: D, x2: W, y2: D },
+      { id: 'D', x1: 0, y1: 0, x2: 0, y2: D },
+    ];
+    for (const edge of edges) {
+      svgEl('line', {
+        x1: edge.x1, y1: edge.y1, x2: edge.x2, y2: edge.y2,
+        stroke: 'transparent', 'stroke-width': hit, class: 'wall-hit',
+        'data-wall': edge.id, 'data-testid': `wall-${edge.id}`,
+      }, content);
+      if (selectedWall === edge.id) {
+        svgEl('line', {
+          x1: edge.x1, y1: edge.y1, x2: edge.x2, y2: edge.y2,
+          stroke: '#23324d', 'stroke-width': 48, 'pointer-events': 'none',
+        }, content);
+      }
+    }
+  }
+}
+function exteriorFace(wall) {
+  return { A: 'S', B: 'W', C: 'N', D: 'E' }[wall] || null;
+}
+function routesOf() {
+  return (job && job.floor && Array.isArray(job.floor.routes)) ? job.floor.routes : [];
+}
+function routeById(id) {
+  return routesOf().find(route => route && route.id === id) || null;
+}
+function routesOn(wall, face) {
+  return routesOf().filter(route => route && route.wall === wall && route.face === face && showContainment[route.type]);
+}
+function faceContext() {
+  if (!job || view === 'PLAN') return null;
+  const parsed = Walls.parseFaceView(view);
+  const wallId = parsed ? parsed.id : view;
+  const face = parsed ? parsed.face : exteriorFace(view);
+  if (!face) return null;
+  const wall = Routes.wallGeometry(job, wallId);
+  if (!wall || !Routes.faceAllowed(wall, face)) return null;
+  const clip = zoneId ? (faceForView(view) || null) : null;
+  return { wallId, face, wall, length: Walls.wallLength(wall), clip };
+}
+function scopeClipFor(route) {
+  if (!zoneId || !route) return null;
+  const z = activeZone();
+  if (!z) return null;
+  return F.zoneTouchingFaces(job, z).find(item => item.wall === route.wall && item.face === route.face) || null;
+}
+function routeInScope(route) {
+  if (!route || !showContainment[route.type]) return false;
+  if (view === 'PLAN') {
+    if (!zoneId) return true;
+    const clip = scopeClipFor(route);
+    return !!(clip && route.endMm > clip.fromMm && route.startMm < clip.toMm);
+  }
+  const ctx = faceContext();
+  if (!ctx || route.wall !== ctx.wallId || route.face !== ctx.face) return false;
+  if (!ctx.clip) return true;
+  return route.endMm > ctx.clip.fromMm && route.startMm < ctx.clip.toMm;
+}
+function clipRefusal(route) {
+  const clip = scopeClipFor(route);
+  if (!clip) return null;
+  if (route.startMm < clip.fromMm || route.endMm > clip.toMm) {
+    return 'Keep both ends inside the part of the wall that belongs to this zone.';
+  }
+  return null;
+}
+function dropRoutePoint() {
+  if (routeTool && routeTool.first) routeTool = { type: routeTool.type, first: null, hover: null };
+}
+function liveRoute(route) {
+  if (routeDrag && routeDrag.routeId === route.id && routeDrag.live) {
+    return { ...route, startMm: routeDrag.live.startMm, endMm: routeDrag.live.endMm };
+  }
+  return route;
+}
+function routeSpan(route, clip) {
+  const live = liveRoute(route);
+  if (!clip) return [live.startMm, live.endMm];
+  const from = Math.max(live.startMm, clip.fromMm);
+  const to = Math.min(live.endMm, clip.toMm);
+  if (to <= from) return null;
+  return [from, to];
+}
+function paintRouteBand(parent, route, x1, y1, x2, y2) {
+  const g = svgEl('g', {
+    class: 'route route-' + route.type,
+    'data-route': route.id,
+    'data-testid': `route-${route.id}`,
+  }, parent);
+  const hit = screenMm(44);
+  svgEl('line', {
+    x1, y1, x2, y2, stroke: 'transparent', 'stroke-width': hit,
+    class: 'route-hit', 'data-route': route.id,
+  }, g);
+  if (route.type === 'trunking') {
+    svgEl('line', { x1, y1, x2, y2, stroke: '#7a5200', 'stroke-width': 70, 'pointer-events': 'none' }, g);
+    svgEl('line', { x1, y1, x2, y2, stroke: '#f2b84b', 'stroke-width': 46, 'pointer-events': 'none' }, g);
+  } else {
+    svgEl('line', {
+      x1, y1, x2, y2, stroke: '#1d5fa8', 'stroke-width': 28,
+      'stroke-dasharray': '90 50', 'pointer-events': 'none',
+    }, g);
+  }
+  const label = svgEl('text', {
+    x: (x1 + x2) / 2, y: (y1 + y2) / 2 - 90,
+    'text-anchor': 'middle', 'font-size': 180, 'font-weight': '700',
+    fill: '#1a1a1a', class: 'route-label', 'pointer-events': 'none',
+  }, g);
+  label.textContent = Routes.routeLabel(route);
+  return g;
+}
+function paintRouteHandles(parent, route, at) {
+  if (mode !== 'select' || selectedRoute !== route.id) return;
+  if (!parent.ownerSVGElement || parent.ownerSVGElement.id !== 'canvas') return;
+  const handle = screenMm(44);
+  for (const which of ['start', 'end']) {
+    const p = at(which);
+    if (!p) continue;
+    svgEl('rect', {
+      x: p.x - handle / 2, y: p.y - handle / 2, width: handle, height: handle,
+      fill: 'transparent', stroke: 'none', class: 'route-handle',
+      'data-which': which, 'data-route': route.id, 'data-testid': `route-handle-${which}`,
+    }, parent);
+    svgEl('rect', {
+      x: p.x - 50, y: p.y - 50, width: 100, height: 100,
+      fill: '#fff', stroke: '#23324d', 'stroke-width': 16, 'pointer-events': 'none',
+    }, parent);
+  }
+}
+function drawPlanRoutes(content) {
+  if (!job) return;
+  const nudge = { N: [0, -120], S: [0, 120], E: [120, 0], W: [-120, 0] };
+  for (const src of routesOf()) {
+    if (!showContainment[src.type] || !routeInScope(src)) continue;
+    const wall = Routes.wallGeometry(job, src.wall);
+    if (!wall || !Routes.faceAllowed(wall, src.face)) continue;
+    const route = liveRoute(src);
+    const clip = zoneId ? scopeClipFor(src) : null;
+    const span = routeSpan(route, clip);
+    if (!span) continue;
+    const a = Walls.planFromOffset(wall, src.face, span[0]);
+    const b = Walls.planFromOffset(wall, src.face, span[1]);
+    if (!a || !b) continue;
+    const shift = nudge[src.face] || [0, 0];
+    paintRouteBand(content, src, a.x + shift[0], a.y + shift[1], b.x + shift[0], b.y + shift[1]);
+    const endsInside = (mm) => !clip || (mm >= clip.fromMm && mm <= clip.toMm);
+    paintRouteHandles(content, src, (which) => {
+      const mm = which === 'start' ? route.startMm : route.endMm;
+      if (!endsInside(mm)) return null;
+      const p = Walls.planFromOffset(wall, src.face, mm);
+      if (!p) return null;
+      return { x: p.x + shift[0], y: p.y + shift[1] };
+    });
+  }
+}
+function drawFaceRoutes(content, wallId, face, H, clip) {
+  for (const src of routesOn(wallId, face)) {
+    if (view !== 'PLAN' && !routeInScope(src) && !(clip && src.endMm > clip.fromMm && src.startMm < clip.toMm)) continue;
+    const route = liveRoute(src);
+    const span = routeSpan(route, clip);
+    if (!span) continue;
+    const y = H - route.heightMm;
+    paintRouteBand(content, src, span[0], y, span[1], y);
+    const endsInside = (mm) => !clip || (mm >= clip.fromMm && mm <= clip.toMm);
+    paintRouteHandles(content, src, (which) => {
+      const mm = which === 'start' ? route.startMm : route.endMm;
+      if (!endsInside(mm)) return null;
+      return { x: mm, y };
+    });
+  }
+}
+function paintRoutePreview(content, H, clip) {
+  if (!routeTool || !routeTool.first || view === 'PLAN') return;
+  const y = H - routeTool.first.height;
+  const x0 = routeTool.first.offset;
+  svgEl('circle', { cx: x0, cy: y, r: 70, fill: routeTool.type === 'conduit' ? '#1d5fa8' : '#7a5200' }, content);
+  if (!routeTool.hover) return;
+  const x1 = routeTool.hover.offset;
+  let from = Math.min(x0, x1);
+  let to = Math.max(x0, x1);
+  if (clip) {
+    from = Math.max(from, clip.fromMm);
+    to = Math.min(to, clip.toMm);
+  }
+  if (to <= from) return;
+  svgEl('line', {
+    x1: from, y1: y, x2: to, y2: y,
+    stroke: routeTool.type === 'conduit' ? '#1d5fa8' : '#f2b84b',
+    'stroke-width': 40, 'stroke-dasharray': '80 50', 'pointer-events': 'none',
+  }, content);
+}
+function worldAtClient(clientX, clientY) {
+  const svg = $('#canvas');
+  const world = $('#world');
+  if (!svg || !world) return null;
+  const ctm = world.getScreenCTM();
+  if (!ctm) return null;
+  const pt = svg.createSVGPoint();
+  pt.x = clientX;
+  pt.y = clientY;
+  try { return pt.matrixTransform(ctm.inverse()); }
+  catch { return null; }
+}
+// Captions sit below the dimension labels. "Wall continues" sits below the
+// floating Layers and zoom controls, which overlay the top of the canvas.
+function faceChromeYs(x0, x1, H) {
+  const svg = $('#canvas');
+  const rect = svg && svg.getBoundingClientRect();
+  let continueY = 420;
+  if (rect && rect.height > 0) {
+    const below = worldAtClient(rect.left + rect.width / 2, rect.top + 68);
+    if (below && Number.isFinite(below.y)) continueY = below.y + 180;
+  }
+  if (continueY < 160) continueY = 160;
+  if (continueY > H - 600) continueY = Math.max(160, Math.min(420, H - 600));
+  const span = Math.max(0, x1 - x0);
+  return {
+    rulerY: H + 200,
+    captionY: H + 720,
+    leftY: continueY,
+    rightY: span < 2800 ? Math.min(continueY + 220, H - 480) : continueY,
+  };
+}
+function paintWallContinues(content, x, y, anchor) {
+  const c = svgEl('text', {
+    x, y, 'font-size': 160, fill: '#555', 'font-family': 'inherit',
+    'text-anchor': anchor, 'data-testid': 'wall-continues',
+  }, content);
+  c.textContent = 'Wall continues';
+  return c;
 }
 function renderWall(content, wall, { W, D, H }, forPrint = false, show = isShown) {
   const fullL = (wall === 'A' || wall === 'C') ? W : D;
@@ -1122,7 +1493,8 @@ function renderWall(content, wall, { W, D, H }, forPrint = false, show = isShown
   svgEl('line', { x1: x0, y1: H, x2: x1, y2: H, stroke: '#1a1a1a', 'stroke-width': 40 }, content); // floor line
   const hT = svgEl('text', { x: x1 + 380, y: H / 2, 'font-size': 240, fill: '#555', 'font-family': 'inherit', 'text-anchor': 'middle', transform: `rotate(-90 ${x1 + 380} ${H / 2})` }, content);
   hT.textContent = `${job.room.heightM.toFixed(2)} m`;
-  const lT = svgEl('text', { x: (x0 + x1) / 2, y: H + 420, 'font-size': 220, fill: '#23324d', 'text-anchor': 'middle', 'font-family': 'inherit', 'data-testid': 'wall-caption' }, content);
+  const chrome = face ? faceChromeYs(x0, x1, H) : null;
+  const lT = svgEl('text', { x: (x0 + x1) / 2, y: chrome ? chrome.captionY : H + 420, 'font-size': 200, fill: '#23324d', 'text-anchor': 'middle', 'font-family': 'inherit', 'data-testid': 'wall-caption' }, content);
   if (face) {
     const z = activeZone();
     lT.textContent = `${z ? z.name : 'Zone'} · Wall ${wall} · ${(face.fromMm / 1000).toFixed(2)} to ${(face.toMm / 1000).toFixed(2)} m of ${(fullL / 1000).toFixed(2)} m`;
@@ -1131,23 +1503,19 @@ function renderWall(content, wall, { W, D, H }, forPrint = false, show = isShown
       fill: '#fff', stroke: '#1a1a1a', 'stroke-width': 25,
     }, content);
     for (const mm of [face.fromMm, face.toMm]) {
-      svgEl('line', { x1: mm, y1: H, x2: mm, y2: H + 120, stroke: '#23324d', 'stroke-width': 12 }, content);
-      const tick = svgEl('text', { x: mm, y: H + 280, 'font-size': 160, fill: '#23324d', 'text-anchor': 'middle', 'data-testid': 'wall-ruler' }, content);
+      svgEl('line', { x1: mm, y1: H, x2: mm, y2: H + 90, stroke: '#23324d', 'stroke-width': 12 }, content);
+      const tick = svgEl('text', { x: mm, y: chrome.rulerY, 'font-size': 150, fill: '#23324d', 'text-anchor': 'middle', 'data-testid': 'wall-ruler' }, content);
       tick.textContent = `${(mm / 1000).toFixed(2)} m`;
     }
-    if (face.fromMm > 0) {
-      const c = svgEl('text', { x: x0, y: -80, 'font-size': 180, fill: '#555', 'data-testid': 'wall-continues' }, content);
-      c.textContent = 'Wall continues';
-    }
-    if (face.toMm < fullL) {
-      const c = svgEl('text', { x: x1, y: -80, 'font-size': 180, fill: '#555', 'text-anchor': 'end', 'data-testid': 'wall-continues' }, content);
-      c.textContent = 'Wall continues';
-    }
-    const outside = job.items.filter(i => i.wall === wall && !F.fittingOnFace(i, face));
-    if (outside.length) {
+    if (face.fromMm > 0) paintWallContinues(content, x0 + 50, chrome.leftY, 'start');
+    if (face.toMm < fullL) paintWallContinues(content, x1 - 50, chrome.rightY, 'end');
+    const outsideF = job.items.filter(i => i.wall === wall && i.wall !== C.CEILING && !F.fittingOnFace(i, face)).length;
+    const outsideFace = exteriorFace(wall);
+    const outsideR = routesOf().filter(r => r && r.wall === wall && r.face === outsideFace && (r.startMm < face.fromMm || r.endMm > face.toMm)).length;
+    const sentence = outsideFaceSentence(outsideF, outsideR);
+    if (sentence) {
       const note = svgEl('text', { x: (x0 + x1) / 2, y: -280, 'font-size': 170, fill: '#23324d', 'text-anchor': 'middle', 'data-testid': 'wall-outside' }, content);
-      const n = outside.length;
-      note.textContent = `${n} ${n === 1 ? 'fitting is' : 'fittings are'} outside this zone. Choose Whole floor to see them.`;
+      note.textContent = sentence;
     }
   } else {
     lT.textContent = `Wall ${wall} · ${(fullL / 1000).toFixed(2)} m — viewed from inside`;
@@ -1195,7 +1563,88 @@ function renderWall(content, wall, { W, D, H }, forPrint = false, show = isShown
     pl.setAttribute('data-index', job.annotations[wall].indexOf(s));
     if (clipId) pl.setAttribute('clip-path', `url(#${clipId})`);
   }
+  drawFaceRoutes(content, wall, exteriorFace(wall), H, face);
+  paintRoutePreview(content, H, face);
   return { L, H, fromMm: x0, toMm: x1 };
+}
+
+function outsideFaceSentence(fittings, routes) {
+  const bits = [];
+  if (fittings) bits.push(`${fittings} ${fittings === 1 ? 'fitting' : 'fittings'}`);
+  if (routes) bits.push(`${routes} ${routes === 1 ? 'route' : 'routes'}`);
+  if (!bits.length) return '';
+  const noun = bits.length === 1 ? bits[0] : `${bits[0]} and ${bits[1]}`;
+  const verb = (fittings + routes) === 1 ? 'is' : 'are';
+  return `${noun} on this face ${verb} outside this zone. Choose Whole floor to see them.`;
+}
+
+function renderInteriorFace(content, parsed, { H }, show = isShown) {
+  const wall = wallRecord(parsed.id);
+  if (!wall) return { L: 0, H, fromMm: 0, toMm: 0 };
+  const fullL = Walls.wallLength(wall);
+  const clip = zoneId ? faceForView(view) : null;
+  const x0 = clip ? clip.fromMm : 0;
+  const x1 = clip ? clip.toMm : fullL;
+  const side = { N: 'north', E: 'east', S: 'south', W: 'west' }[parsed.face] || parsed.face;
+  const sideLabel = `${parsed.id} ${side} side`;
+  svgEl('line', { x1: x0, y1: H, x2: x1, y2: H, stroke: '#1a1a1a', 'stroke-width': 40 }, content);
+  const hT = svgEl('text', { x: x1 + 380, y: H / 2, 'font-size': 240, fill: '#555', 'font-family': 'inherit', 'text-anchor': 'middle', transform: `rotate(-90 ${x1 + 380} ${H / 2})` }, content);
+  hT.textContent = `${job.room.heightM.toFixed(2)} m`;
+  svgEl('rect', {
+    x: x0, y: 0, width: Math.max(1, x1 - x0), height: H,
+    fill: '#fff', stroke: '#1a1a1a', 'stroke-width': 25,
+  }, content);
+  const chrome = (clip && zoneId) ? faceChromeYs(x0, x1, H) : null;
+  const lT = svgEl('text', { x: (x0 + x1) / 2, y: chrome ? chrome.captionY : H + 720, 'font-size': 200, fill: '#23324d', 'text-anchor': 'middle', 'font-family': 'inherit', 'data-testid': 'wall-caption' }, content);
+  if (clip && zoneId) {
+    const z = activeZone();
+    lT.textContent = `${z ? z.name : 'Zone'} · ${sideLabel} · ${(clip.fromMm / 1000).toFixed(2)} to ${(clip.toMm / 1000).toFixed(2)} m of ${(fullL / 1000).toFixed(2)} m`;
+    for (const mm of [clip.fromMm, clip.toMm]) {
+      svgEl('line', { x1: mm, y1: H, x2: mm, y2: H + 90, stroke: '#23324d', 'stroke-width': 12 }, content);
+      const tick = svgEl('text', { x: mm, y: chrome.rulerY, 'font-size': 150, fill: '#23324d', 'text-anchor': 'middle', 'data-testid': 'wall-ruler' }, content);
+      tick.textContent = `${(mm / 1000).toFixed(2)} m`;
+    }
+    if (clip.fromMm > 0) paintWallContinues(content, x0 + 50, chrome.leftY, 'start');
+    if (clip.toMm < fullL) paintWallContinues(content, x1 - 50, chrome.rightY, 'end');
+    const outsideF = job.items.filter(i => i.wall === parsed.id && i.face === parsed.face && !F.fittingOnFace(i, clip)).length;
+    const outsideR = ((job.floor && job.floor.routes) || []).filter(r => r && r.wall === parsed.id && r.face === parsed.face && (r.startMm < clip.fromMm || r.endMm > clip.toMm || r.startMm > clip.toMm || r.endMm < clip.fromMm)).length;
+    const sentence = outsideFaceSentence(outsideF, outsideR);
+    if (sentence) {
+      const note = svgEl('text', { x: (x0 + x1) / 2, y: -280, 'font-size': 170, fill: '#23324d', 'text-anchor': 'middle', 'data-testid': 'wall-outside' }, content);
+      note.textContent = sentence;
+    }
+  } else {
+    lT.textContent = `${sideLabel} · ${(fullL / 1000).toFixed(2)} m`;
+    for (const mm of [0, fullL]) {
+      svgEl('line', { x1: mm, y1: H, x2: mm, y2: H + 90, stroke: '#23324d', 'stroke-width': 12 }, content);
+      const tick = svgEl('text', { x: mm, y: H + 200, 'font-size': 150, fill: '#23324d', 'text-anchor': 'middle', 'data-testid': 'wall-ruler' }, content);
+      tick.textContent = `${(mm / 1000).toFixed(2)} m`;
+    }
+  }
+  for (const item of job.items) {
+    if (!show(item) || item.wall !== parsed.id || item.face !== parsed.face) continue;
+    if (clip && !F.fittingOnFace(item, clip)) continue;
+    content.appendChild(fittingGlyph(item, item.fromLeftMm, H - item.heightMm));
+    if (item.id === selectedId) {
+      svgEl('line', { x1: x0, y1: H - item.heightMm, x2: item.fromLeftMm, y2: H - item.heightMm, stroke: '#b26a00', 'stroke-width': 18, 'stroke-dasharray': '80 50' }, content);
+      svgEl('line', { x1: item.fromLeftMm, y1: H, x2: item.fromLeftMm, y2: H - item.heightMm, stroke: '#b26a00', 'stroke-width': 18, 'stroke-dasharray': '80 50' }, content);
+    }
+  }
+  let clipId = null;
+  if (clip) {
+    clipId = `zone-face-clip-${parsed.id}-${parsed.face}`;
+    const defs = svgEl('defs', {}, content);
+    const cp = svgEl('clipPath', { id: clipId }, defs);
+    svgEl('rect', { x: x0, y: -2000, width: Math.max(1, x1 - x0), height: H + 4000 }, cp);
+  }
+  const key = view;
+  for (const s of job.annotations[key] || []) {
+    const pl = svgEl('polyline', { points: s.points.map(pt => pt.join(',')).join(' '), fill: 'none', stroke: '#2266cc', 'stroke-width': 25, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', class: 'stroke' }, content);
+    if (clipId) pl.setAttribute('clip-path', `url(#${clipId})`);
+  }
+  drawFaceRoutes(content, parsed.id, parsed.face, H, clip);
+  paintRoutePreview(content, H, clip);
+  return { L: fullL, H, fromMm: x0, toMm: x1 };
 }
 
 function renderCanvas() {
@@ -1204,13 +1653,18 @@ function renderCanvas() {
   if (!job || !job.room || !job.room.widthM) { svg.setAttribute('viewBox', '0 0 100 100'); renderLayerEmpty(); return; }
   const dims = roomMm();
   let vbX = -900, vbY = -900, vbW, vbH;
-  const clipFace = view === 'PLAN' ? null : zoneFaceFor(view);
+  const interior = Walls.parseFaceView(view);
+  const clipFace = view === 'PLAN' ? null : (zoneId ? faceForView(view) : null);
   if (view === 'PLAN') { vbW = dims.W + 1800; vbH = dims.D + 1800; }
   else if (clipFace) {
     const span = Math.max(100, clipFace.toMm - clipFace.fromMm);
     vbX = clipFace.fromMm - 900;
     vbW = span + 1800;
     vbH = dims.H + 1800;
+  } else if (interior) {
+    const wall = wallRecord(interior.id);
+    const L = wall ? Walls.wallLength(wall) : 0;
+    vbW = Math.max(100, L) + 1800; vbH = dims.H + 1800;
   } else {
     const L = (view === 'A' || view === 'C') ? dims.W : dims.D;
     vbW = L + 1800; vbH = dims.H + 1800;
@@ -1219,6 +1673,7 @@ function renderCanvas() {
   const world = svgEl('g', { id: 'world', transform: `translate(${zoom.tx} ${zoom.ty}) scale(${zoom.s})` }, svg);
   const content = svgEl('g', {}, world);
   if (view === 'PLAN') renderPlan(content, dims);
+  else if (interior) renderInteriorFace(content, interior, dims);
   else renderWall(content, view, dims);
   // note pins
   const pins = (job.notePins || []).filter(p => {
@@ -1243,6 +1698,13 @@ function renderCanvas() {
     const sel = svg.querySelector(`.fitting[data-id="${selectedId}"]`);
     if (sel) { const r = svgEl('rect', { x: -180, y: -180, width: 360, height: 360, fill: 'none', stroke: '#2266cc', 'stroke-width': 40 }); sel.insertBefore(r, sel.firstChild); }
   }
+  if (highlightIds) {
+    for (const id of highlightIds) {
+      if (id === selectedId) continue;
+      const sel = svg.querySelector(`.fitting[data-id="${id}"]`);
+      if (sel) { const r = svgEl('rect', { x: -180, y: -180, width: 360, height: 360, fill: 'none', stroke: '#b45309', 'stroke-width': 30 }); sel.insertBefore(r, sel.firstChild); }
+    }
+  }
   const placeLayer = copyTpl ? (copyTpl.layer ?? C.defaultLayerFor(copyTpl.type)) : C.defaultLayerFor(placeType);
   const placeLayerHidden = !shownLayers.has(placeLayer);
   $('#hint').textContent = multiIds ? 'Tap fittings to add or remove them, then enter one height.' : {
@@ -1251,7 +1713,7 @@ function renderCanvas() {
       + (placeLayerHidden ? ` Its layer (${C.LAYER_LABELS[placeLayer]}) is hidden and will be shown when you place it.` : ''),
     draw: 'Sketches are notes only, shared by all layers. They are never priced.',
     notes: 'Tap to add a note. Notes are shared by all layers.',
-    build: zoneTool ? 'Tap two corners on the plan. The second tap adds the zone.' : 'Add a zone by two taps, or enter its size.',
+    build: routePreviewHint() || wallPreviewHint() || (zoneTool ? 'Tap two corners on the plan. The second tap adds the zone.' : (view === 'PLAN' ? 'Add a wall or a zone by two taps, or enter its size.' : 'Add trunking or conduit by two taps, or enter its size.')),
   }[mode] || '';
   renderLayerEmpty();
 }
@@ -1261,7 +1723,12 @@ function renderLayerEmpty() {
   const box = $('#layer-empty');
   let msg = '';
   if (job && job.room && job.room.widthM) {
-    const here = view === 'PLAN' ? job.items : job.items.filter(i => i.wall === view || i.wall === C.CEILING);
+    const parsedView = Walls.parseFaceView(view);
+    const here = view === 'PLAN'
+      ? job.items
+      : job.items.filter(i => parsedView
+        ? (i.wall === parsedView.id && i.face === parsedView.face)
+        : (i.wall === view || i.wall === C.CEILING));
     const hiddenHere = here.filter(i => !isShown(i)).length;
     if (!shownLayers.size) msg = `All layers are hidden.${hiddenHere ? ` ${hiddenHere} fitting${hiddenHere === 1 ? '' : 's'} on this view aren’t shown.` : ''}`;
     else if (here.length && hiddenHere === here.length) msg = `Nothing shown on this view. ${hiddenHere} fitting${hiddenHere === 1 ? ' is' : 's are'} on hidden layers.`;
@@ -1327,10 +1794,37 @@ function renderLayers() {
     panel.appendChild(row);
   }
   const all = el('button', { class: 'layer-all', 'data-key': 'all', 'data-testid': 'layers-show-all' }, 'Show all');
-  all.disabled = allShown();
-  all.addEventListener('click', () => applyLayers(new Set(C.LAYERS)));
+  all.disabled = allShown() && showContainment.trunking && showContainment.conduit;
+  all.addEventListener('click', () => {
+    showContainment = { trunking: true, conduit: true };
+    applyLayers(new Set(C.LAYERS));
+  });
   panel.appendChild(all);
   panel.appendChild(el('p', { class: 'layers-note' }, 'Hiding a layer only changes the drawing. The quote, CSV and whole-job print still include every fitting. Sketches and notes are shared by all layers and always show.'));
+  panel.appendChild(el('p', { class: 'layers-title' }, 'Containment'));
+  for (const kind of ['trunking', 'conduit']) {
+    const n = routesOf().filter(route => route && route.type === kind).length;
+    const row = el('div', { class: 'layer-row' });
+    const lbl = el('label', { class: 'layer-check' });
+    const cb = el('input', { type: 'checkbox', 'data-testid': `containment-${kind}` });
+    cb.checked = !!showContainment[kind];
+    cb.addEventListener('change', () => {
+      showContainment = { ...showContainment, [kind]: cb.checked };
+      const selected = routeById(selectedRoute);
+      if (selected && !showContainment[selected.type]) {
+        const label = Routes.routeLabel(selected);
+        const name = selected.type === 'conduit' ? 'Conduit' : 'Trunking';
+        selectedRoute = null;
+        toast(`${label} is no longer selected because ${name} is hidden.`);
+      }
+      renderAll();
+    });
+    const name = kind === 'trunking' ? 'Trunking' : 'Conduit';
+    lbl.append(cb, el('span', {}, `${name} (${n})`));
+    row.appendChild(lbl);
+    panel.appendChild(row);
+  }
+  panel.appendChild(el('p', { class: 'layers-note', 'data-testid': 'containment-warning' }, CONTAINMENT_WARNING));
   const target = focusKey && panel.querySelector(`[data-key="${focusKey}"]`);
   if (target && !target.disabled) target.focus({ preventScroll: true });
   else if (focusKey) btn.focus({ preventScroll: true });
@@ -1339,15 +1833,20 @@ function renderLayers() {
 // ---- Tabs, quote bar, inspector ----------------------------------------------
 function activeZone() { return zoneId ? F.zoneById(job, zoneId) : null; }
 function renderZoneNotes(host) {
-  const notes = el('div', { class: 'zone-notes', 'data-testid': 'zone-notes' });
   const z = activeZone();
-  const faces = z ? F.positiveFaces(job.room, z) : [];
-  if (!z) notes.appendChild(el('p', {}, '\u00a0'));
-  else if (!faces.length) notes.appendChild(el('p', {}, 'This zone has no walls yet. Add one in Build mode.'));
-  else {
-    const lines = F.edgeNotes(z, faces);
-    if (!lines.length) notes.appendChild(el('p', {}, 'Every edge of this zone meets an outside wall.'));
-    else for (const line of lines) notes.appendChild(el('p', {}, line));
+  if (!z) return;
+  const faces = F.zoneTouchingFaces(job, z);
+  const lines = faces.length
+    ? F.edgeNotes(z, faces)
+    : ['This zone has no walls yet. Add one in Build mode.'];
+  if (!lines.length) return;
+  const notes = el('div', { class: 'zone-notes' + (zoneNotesOpen ? ' zone-notes-open' : ''), 'data-testid': 'zone-notes' });
+  const shown = zoneNotesOpen ? lines : lines.slice(0, 2);
+  for (const line of shown) notes.appendChild(el('p', {}, line));
+  if (!zoneNotesOpen && lines.length > 2) {
+    const more = el('button', { type: 'button', 'data-testid': 'zone-notes-more' }, 'More');
+    more.addEventListener('click', () => { zoneNotesOpen = true; renderTabs(); });
+    notes.appendChild(more);
   }
   host.appendChild(notes);
 }
@@ -1365,16 +1864,19 @@ function renderTabs() {
       zoneId = null;
       view = 'PLAN';
       zoneTool = { first: null };
+      wallTool = null;
+      routeTool = null;
       setMode('build');
       renderAll();
       return;
     }
     const nextZone = sel.value || null;
     if (selectedId && !selectionVisible(selectedId, nextZone)) selectedId = null;
+    dropRoutePoint();
     zoneId = nextZone;
+    zoneNotesOpen = false;
     if (zoneId && PHONE.matches) inspectorCollapsed = true;
-    const z = activeZone();
-    if (z && view !== 'PLAN' && !F.positiveFaces(job.room, z).some(face => face.wall === view)) view = 'PLAN';
+    if (view !== 'PLAN' && !scopeFaces().some(face => face.view === view)) view = 'PLAN';
     renderAll();
   });
   tabs.appendChild(sel);
@@ -1387,15 +1889,18 @@ function renderTabs() {
     return { text: filtered ? `${shown}/${list.length}` : String(list.length), title: filtered ? `${shown} of ${list.length} fittings shown` : '' };
   };
   const zScope = activeZone();
-  const scopedFaces = zScope ? F.positiveFaces(job.room, zScope) : null;
+  const scopedFaces = zScope ? F.zoneTouchingFaces(job, zScope) : null;
   const ceilItems = job.items.filter(i => {
     if (i.wall !== C.CEILING) return false;
     if (!zScope) return true;
     return i.fromLeftMm >= zScope.x0 && i.fromLeftMm <= zScope.x1 && i.heightMm >= zScope.y0 && i.heightMm <= zScope.y1;
   });
-  const wallDefs = scopedFaces
-    ? scopedFaces.map(face => ({ v: face.wall, items: job.items.filter(i => F.fittingOnFace(i, face)) }))
-    : ['A', 'B', 'C', 'D'].map(v => ({ v, items: job.items.filter(i => i.wall === v) }));
+  const listed = zScope ? scopedFaces : F.wholeFloorFaces(job);
+  const wallDefs = listed.map(face => ({
+    v: face.view,
+    labelName: face.label,
+    items: job.items.filter(i => F.fittingOnFace(i, face)),
+  }));
   const planItems = scopedFaces
     ? job.items.filter(i => i.wall === C.CEILING ? ceilItems.includes(i) : scopedFaces.some(face => F.fittingOnFace(i, face)))
     : job.items;
@@ -1403,7 +1908,8 @@ function renderTabs() {
   const defs = [{ v: 'PLAN', label: `Plan (${planCount.text})`, title: planCount.title }];
   for (const wall of wallDefs) {
     const c = count(wall.items);
-    defs.push({ v: wall.v, label: `Wall ${wall.v} (${c.text})`, title: c.title });
+    const name = wall.labelName || `Wall ${wall.v}`;
+    defs.push({ v: wall.v, label: `${name} (${c.text})`, title: c.title });
   }
   if (ceilItems.length) defs.push({ v: null, label: `Ceiling fittings: ${count(ceilItems).text} (plan only)`, info: true });
   for (const d of defs) {
@@ -1415,6 +1921,8 @@ function renderTabs() {
     if (d.title) b.title = d.title;
     b.addEventListener('click', () => {
       if (zoneTool && zoneTool.first) zoneTool = { first: null };
+      if (wallTool && wallTool.first) wallTool = { first: null, hover: null };
+      dropRoutePoint();
       view = d.v;
       // a copied downlight can only go on the ceiling in the plan view
       if (copyTpl && copyTpl.type === 'downlight' && view !== 'PLAN' && endCopy()) toast('Stopped placing copies. Downlights can only be copied in the plan view.');
@@ -1422,7 +1930,16 @@ function renderTabs() {
     });
     faces.appendChild(b);
   }
+  if (faces.childElementCount > 5) faces.classList.add('faces-scroll');
   renderZoneNotes(tabs);
+  const activeFace = faces.querySelector('button.active');
+  // scroll only the face row; scrollIntoView would also slide the clipped #app sideways
+  if (activeFace && PHONE.matches && faces.classList.contains('faces-scroll')) {
+    const row = faces.getBoundingClientRect();
+    const tab = activeFace.getBoundingClientRect();
+    if (tab.left < row.left) faces.scrollLeft -= row.left - tab.left;
+    else if (tab.right > row.right) faces.scrollLeft += tab.right - row.right;
+  }
 }
 
 function renderQuote() {
@@ -1511,6 +2028,13 @@ function applyZoneEdits(z, fields, onDone) {
   toast(`Updated ${name.trim() || z.name}.`);
   if (onDone) onDone();
 }
+function selectNewZone(id) {
+  zoneId = id;
+  selectedId = null;
+  selectedRoute = null;
+  selectedWall = null;
+  multiIds = null;
+}
 function addZoneFromFields(fields) {
   const name = fields.name.value;
   const x0 = readWholeMm(fields.x0);
@@ -1524,8 +2048,7 @@ function addZoneFromFields(fields) {
   let id = null;
   commit(() => {
     id = C.addZone(job, { name, x0, y0, x1: x0 + width, y1: y0 + depth });
-    zoneId = id;
-    if (selectedId && !selectionVisible(selectedId, id)) selectedId = null;
+    if (id) selectNewZone(id);
   }, { exact: true });
   if (!id || !F.zoneById(job, id)) return false;
   const made = F.zoneById(job, id);
@@ -1574,6 +2097,297 @@ function openZoneSizeForm() {
     { label: 'Add', class: 'btn-primary', testid: 'zone-apply', fn: () => { if (addZoneFromFields(fields)) closeModal(); } },
   ]);
 }
+function englishList(items) {
+  if (!items.length) return '';
+  if (items.length === 1) return items[0];
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+function sideWord(face) {
+  return { N: 'north', E: 'east', S: 'south', W: 'west' }[face] || face;
+}
+function attachmentReport(id) {
+  const fittings = (job.items || []).filter(it => it && it.wall === id).map(it => it.id);
+  const routes = ((job.floor && job.floor.routes) || []).filter(r => r && r.wall === id).map(r => Routes.routeLabel(r));
+  const sketchFaces = [];
+  for (const key of Object.keys(job.annotations || {})) {
+    const parsed = Walls.parseFaceView(key);
+    if (!parsed || parsed.id !== id) continue;
+    const strokes = job.annotations[key];
+    if (Array.isArray(strokes) && strokes.length) sketchFaces.push(`${sideWord(parsed.face)} side`);
+  }
+  let notes = 0;
+  for (const pin of job.notePins || []) {
+    const parsed = pin && Walls.parseFaceView(pin.view);
+    if (parsed && parsed.id === id) notes += 1;
+  }
+  return { fittings, routes, sketchFaces, notes };
+}
+function wouldStrand(before, next) {
+  const fittings = [];
+  const routes = [];
+  let sketches = 0;
+  let notes = 0;
+  for (const it of job.items || []) {
+    if (!it || it.wall !== before.id) continue;
+    const off = Walls.carriedOffset(before, next, it.face, it.fromLeftMm);
+    if (Walls.attachmentProblem(next, it.face, off, 'fitting')) fittings.push(it.id);
+  }
+  for (const route of (job.floor && job.floor.routes) || []) {
+    if (!route || route.wall !== before.id) continue;
+    const start = Walls.carriedOffset(before, next, route.face, route.startMm);
+    const end = Walls.carriedOffset(before, next, route.face, route.endMm);
+    if (Walls.attachmentProblem(next, route.face, start, 'route') || Walls.attachmentProblem(next, route.face, end, 'route')) {
+      routes.push(Routes.routeLabel(route));
+    }
+  }
+  for (const pin of job.notePins || []) {
+    const parsed = pin && Walls.parseFaceView(pin.view);
+    if (!parsed || parsed.id !== before.id) continue;
+    const off = Walls.carriedOffset(before, next, parsed.face, pin.x);
+    if (Walls.attachmentProblem(next, parsed.face, off, 'note')) notes += 1;
+  }
+  for (const key of Object.keys(job.annotations || {})) {
+    const parsed = Walls.parseFaceView(key);
+    if (!parsed || parsed.id !== before.id) continue;
+    const strokes = job.annotations[key];
+    if (!Array.isArray(strokes)) continue;
+    for (const stroke of strokes) {
+      if (!stroke || !Array.isArray(stroke.points)) continue;
+      for (const point of stroke.points) {
+        if (!Array.isArray(point)) continue;
+        const off = Walls.carriedOffset(before, next, parsed.face, point[0]);
+        if (Walls.attachmentProblem(next, parsed.face, off, 'sketch')) sketches += 1;
+      }
+    }
+  }
+  return { fittings, routes, notes, sketches };
+}
+function showWallAttachments(id) {
+  const wall = wallRecord(id);
+  const report = attachmentReport(id);
+  const faces = wall ? Walls.facesFor(wall) : [];
+  let face = faces[0] || null;
+  for (const candidate of faces) {
+    const key = `${id}.${candidate}`;
+    const hasItem = (job.items || []).some(it => it.wall === id && it.face === candidate);
+    const hasRoute = routesOf().some(route => route.wall === id && route.face === candidate);
+    const hasSketch = Array.isArray(job.annotations && job.annotations[key]) && job.annotations[key].length;
+    const hasPin = (job.notePins || []).some(pin => pin.view === key);
+    if (hasItem || hasRoute || hasSketch || hasPin) { face = candidate; break; }
+  }
+  if (face) {
+    const key = `${id}.${face}`;
+    if (!scopeFaces().some(item => item.view === key)) zoneId = null;
+    view = key;
+  }
+  highlightIds = report.fittings.slice();
+  selectedId = report.fittings[0] || null;
+  selectedRoute = selectedId ? null : (routesOf().find(route => route.wall === id) || {}).id || null;
+  selectedWall = selectedId || selectedRoute ? null : id;
+  if (PHONE.matches) inspectorCollapsed = true;
+  renderAll();
+}
+function openRemoveWallDialog(id, report) {
+  const parts = [];
+  if (report.fittings.length) parts.push(`${report.fittings.length} ${report.fittings.length === 1 ? 'fitting' : 'fittings'} (${report.fittings.join(', ')})`);
+  if (report.routes.length) parts.push(`${report.routes.length} ${report.routes.length === 1 ? 'route' : 'routes'} (${report.routes.join(', ')})`);
+  if (report.sketchFaces.length) parts.push(`sketches on its ${englishList(report.sketchFaces)}`);
+  if (report.notes) parts.push(`${report.notes} ${report.notes === 1 ? 'note' : 'notes'}`);
+  modal(`${id} can’t be removed yet`, [el('p', {}, `It still has ${englishList(parts)}. Move or delete them first.`)], [
+    { label: 'Show them', testid: 'wall-show-attachments', fn: () => { closeModal(); showWallAttachments(id); } },
+    { label: 'Close', testid: 'wall-remove-close', fn: () => { closeModal(); renderAll(); } },
+  ]);
+}
+function openShortenDialog(stranded) {
+  renderAll();
+  const bits = [];
+  if (stranded.fittings.length) bits.push(englishList(stranded.fittings));
+  if (stranded.routes.length) bits.push(englishList(stranded.routes.map(routeId => `route ${routeId}`)));
+  if (stranded.notes) bits.push(stranded.notes === 1 ? 'a note' : `${stranded.notes} notes`);
+  if (stranded.sketches) bits.push(stranded.sketches === 1 ? 'a sketch' : `${stranded.sketches} sketches`);
+  modal('Keep the wall longer', [el('p', {}, `This would leave ${englishList(bits)} off the end of the wall. Move them first, or keep the wall longer.`)], [
+    { label: 'Show them', testid: 'wall-show-attachments', fn: () => { closeModal(); if (selectedWall) showWallAttachments(selectedWall); } },
+    { label: 'Close', testid: 'wall-remove-close', fn: () => { closeModal(); renderAll(); } },
+  ]);
+}
+function orderedWall(spec) {
+  const next = { x1: spec.x1, y1: spec.y1, x2: spec.x2, y2: spec.y2 };
+  if (next.x1 > next.x2) { const t = next.x1; next.x1 = next.x2; next.x2 = t; }
+  if (next.y1 > next.y2) { const t = next.y1; next.y1 = next.y2; next.y2 = t; }
+  return next;
+}
+function sameLineMove(before, next) {
+  if (!Walls.sameWallLine(before, next)) {
+    const axis = Walls.wallAxis(before);
+    if (axis === 'H') return Math.abs(next.y1 - before.y1);
+    if (axis === 'V') return Math.abs(next.x1 - before.x1);
+  }
+  return 0;
+}
+function applyWallSpec(id, spec) {
+  const before = wallRecord(id);
+  if (!before) return false;
+  const next = orderedWall(spec);
+  const stranded = wouldStrand(before, { ...before, ...next });
+  if (stranded.fittings.length || stranded.routes.length || stranded.notes || stranded.sketches) {
+    openShortenDialog(stranded);
+    return false;
+  }
+  const shift = sameLineMove(before, next);
+  const fittingCount = (job.items || []).filter(it => it && it.wall === id).length;
+  const routeCount = ((job.floor && job.floor.routes) || []).filter(r => r && r.wall === id).length;
+  const prior = snapshot();
+  const ok = commit(() => { C.replaceWall(job, id, next); }, { exact: true });
+  if (!ok || snapshot() === prior) return false;
+  if (shift) {
+    const moved = [];
+    if (fittingCount) moved.push(`${fittingCount} ${fittingCount === 1 ? 'fitting' : 'fittings'}`);
+    if (routeCount) moved.push(`${routeCount} ${routeCount === 1 ? 'route' : 'routes'}`);
+    const tail = moved.length ? ` Its ${englishList(moved)} moved with it.` : '';
+    toast(`Moved ${id} by ${shift} mm.${tail}`);
+  } else toast(`Updated ${id}.`);
+  return true;
+}
+function wallLengthText(wall) {
+  return `${(Walls.wallLength(wall) / 1000).toFixed(2)} m`;
+}
+function focusWall() {
+  inspectorCollapsed = !!PHONE.matches;
+  renderAll();
+}
+function inspectorWallPanel() {
+  const id = selectedWall;
+  const box = $('#inspector');
+  box.innerHTML = '';
+  const interior = wallRecord(id);
+  const head = el('div', { class: 'inspector-head' });
+  const title = interior ? `${id} · ${wallLengthText(interior)}` : `Wall ${id}`;
+  head.append(el('h2', {}, title), inspectorToggle());
+  box.appendChild(head);
+  if (inspectorCollapsed) return;
+  if (!interior) {
+    box.appendChild(el('p', {}, 'Exterior wall. Change its length in Menu → Floor size.'));
+    const open = el('button', { 'data-testid': 'wall-open-exterior' }, `Open Wall ${id}`);
+    open.addEventListener('click', () => {
+      view = id;
+      if (PHONE.matches) inspectorCollapsed = true;
+      renderAll();
+    });
+    box.appendChild(open);
+    return;
+  }
+  const axis = Walls.wallAxis(interior);
+  const fields = {
+    line: zoneField('Line', 'wall-line', String(axis === 'H' ? interior.y1 : interior.x1), true),
+    start: zoneField('Start', 'wall-start', String(axis === 'H' ? interior.x1 : interior.y1), true),
+    end: zoneField('End', 'wall-end', String(axis === 'H' ? interior.x2 : interior.y2), true),
+  };
+  const labels = axis === 'H'
+    ? [['Line y (mm)', fields.line], ['Start x (mm)', fields.start], ['End x (mm)', fields.end]]
+    : [['Line x (mm)', fields.line], ['Start y (mm)', fields.start], ['End y (mm)', fields.end]];
+  const apply = () => {
+    const line = readWholeMm(fields.line);
+    const start = readWholeMm(fields.start);
+    const end = readWholeMm(fields.end);
+    if (line === null || start === null || end === null) { toast('Enter whole millimetres.'); return; }
+    const spec = axis === 'H' ? { x1: start, y1: line, x2: end, y2: line } : { x1: line, y1: start, x2: line, y2: end };
+    applyWallSpec(id, spec);
+  };
+  for (const [labelText, input] of labels) {
+    box.appendChild(el('label', {}, labelText));
+    box.appendChild(input);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply(); } });
+  }
+  const go = el('button', { class: 'btn-primary', 'data-testid': 'wall-apply' }, 'Apply');
+  go.addEventListener('click', apply);
+  box.appendChild(go);
+  const fittingCount = (job.items || []).filter(it => it && it.wall === id).length;
+  const routeCount = ((job.floor && job.floor.routes) || []).filter(r => r && r.wall === id).length;
+  box.appendChild(el('p', { 'data-testid': 'wall-facts' }, `${wallLengthText(interior)} · ${fittingCount} ${fittingCount === 1 ? 'fitting' : 'fittings'} · ${routeCount} ${routeCount === 1 ? 'route' : 'routes'}`));
+  for (const face of Walls.facesFor(interior)) {
+    const open = el('button', { 'data-testid': `wall-open-${face}` }, `Open ${sideWord(face)} side`);
+    open.addEventListener('click', () => {
+      const key = `${id}.${face}`;
+      if (!scopeFaces().some(item => item.view === key)) {
+        zoneId = null;
+        toast('Whole floor is open so you can see that side.');
+      }
+      view = key;
+      if (PHONE.matches) inspectorCollapsed = true;
+      renderAll();
+    });
+    box.appendChild(open);
+  }
+  const remove = el('button', { class: 'btn-danger', 'data-testid': 'wall-remove' }, 'Remove wall');
+  remove.addEventListener('click', () => {
+    const report = attachmentReport(id);
+    if (report.fittings.length || report.routes.length || report.sketchFaces.length || report.notes) {
+      openRemoveWallDialog(id, report);
+      return;
+    }
+    const prior = snapshot();
+    commit(() => { C.removeWall(job, id); }, { exact: true });
+    if (snapshot() === prior) return;
+    selectedWall = null;
+    if (view.startsWith(id + '.')) view = 'PLAN';
+    toast(`Removed ${id}. Undo brings it back.`);
+    renderAll();
+  });
+  box.appendChild(remove);
+}
+function openWallSizeForm() {
+  const box = el('div');
+  const axis = el('select', { 'data-testid': 'wall-axis' });
+  axis.append(el('option', { value: 'horizontal' }, 'Horizontal'), el('option', { value: 'vertical' }, 'Vertical'));
+  const fields = {
+    line: zoneField('Line', 'wall-line', '', true),
+    start: zoneField('Start', 'wall-start', '', true),
+    end: zoneField('End', 'wall-end', '', true),
+  };
+  const lineLabel = el('label', {}, 'Line y (mm)');
+  const startLabel = el('label', {}, 'Start x (mm)');
+  const endLabel = el('label', {}, 'End x (mm)');
+  const syncLabels = () => {
+    const horizontal = axis.value === 'horizontal';
+    lineLabel.textContent = horizontal ? 'Line y (mm)' : 'Line x (mm)';
+    startLabel.textContent = horizontal ? 'Start x (mm)' : 'Start y (mm)';
+    endLabel.textContent = horizontal ? 'End x (mm)' : 'End y (mm)';
+  };
+  axis.addEventListener('change', syncLabels);
+  box.append(el('label', {}, 'Direction'), axis, lineLabel, fields.line, startLabel, fields.start, endLabel, fields.end);
+  const add = () => {
+    const line = readWholeMm(fields.line);
+    const start = readWholeMm(fields.start);
+    const end = readWholeMm(fields.end);
+    if (line === null || start === null || end === null) { toast('Enter whole millimetres.'); return false; }
+    const spec = axis.value === 'horizontal'
+      ? orderedWall({ x1: start, y1: line, x2: end, y2: line })
+      : orderedWall({ x1: line, y1: start, x2: line, y2: end });
+    let id = null;
+    commit(() => { id = C.addWall(job, spec); }, { exact: true });
+    if (!id || !wallRecord(id)) return false;
+    selectedWall = id;
+    selectedId = null;
+    selectedRoute = null;
+    wallTool = { first: null, hover: null };
+    const made = wallRecord(id);
+    toast(`Added ${id}, ${wallLengthText(made)} long. Undo removes it.`);
+    focusWall();
+    return true;
+  };
+  for (const input of [fields.line, fields.start, fields.end]) {
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      if (add()) closeModal();
+    });
+  }
+  modal('Wall size', [box], [
+    { label: 'Cancel', fn: closeModal },
+    { label: 'Add', class: 'btn-primary', testid: 'wall-add', fn: () => { if (add()) closeModal(); } },
+  ]);
+}
 function inspectorZonePanel() {
   const z = activeZone();
   const box = $('#inspector');
@@ -1603,8 +2417,8 @@ function inspectorZonePanel() {
     `Facts: ${facts.faces} wall ${facts.faces === 1 ? 'face' : 'faces'}, ${facts.bareEdges} ${facts.bareEdges === 1 ? 'edge' : 'edges'} without a wall, ${facts.fittings} ${facts.fittings === 1 ? 'fitting' : 'fittings'}`));
   const showWalls = el('button', { 'data-testid': 'zone-show-walls' }, 'Show its walls');
   showWalls.addEventListener('click', () => {
-    const first = F.positiveFaces(job.room, z)[0];
-    view = first ? first.wall : 'PLAN';
+    const first = F.zoneTouchingFaces(job, z)[0];
+    view = first ? first.view : 'PLAN';
     if (PHONE.matches) inspectorCollapsed = true;
     renderAll();
   });
@@ -1674,7 +2488,88 @@ function inspectorRoomPanel() {
   legend.appendChild(el('li', {}, 'F1, F2… are fitting numbers. The letters after the dot are the fitting type.'));
   legend.appendChild(el('li', {}, 'Dashed circles are ceiling fittings (plan view only)'));
   legend.appendChild(el('li', {}, 'Use “Layers” above the drawing to show lighting, sockets & spurs or three-phase on their own or together.'));
+  legend.appendChild(el('li', {}, 'T1, T2… trunking, drawn as a solid amber band.'));
+  legend.appendChild(el('li', {}, 'C1, C2… conduit, drawn as a dashed blue line.'));
+  legend.appendChild(el('li', { 'data-testid': 'containment-warning' }, CONTAINMENT_WARNING));
   box.appendChild(legend);
+}
+function inspectorRoutePanel() {
+  const route = routeById(selectedRoute);
+  const box = $('#inspector');
+  box.innerHTML = '';
+  const label = route ? Routes.routeLabel(route) : 'Run';
+  const head = el('div', { class: 'inspector-head' });
+  head.append(el('h2', {}, label), inspectorToggle());
+  box.appendChild(head);
+  if (!route || inspectorCollapsed) return;
+  const wall = Routes.wallGeometry(job, route.wall);
+  const length = wall ? Walls.wallLength(wall) : 0;
+  const fields = {
+    type: el('select', { 'data-testid': 'route-type' }),
+    start: zoneField('Start', 'route-start', String(route.startMm), true),
+    end: zoneField('End', 'route-end', String(route.endMm), true),
+    height: zoneField('Height', 'route-height', String(route.heightMm), true),
+    notes: el('textarea', { 'data-testid': 'route-notes', maxlength: '200' }),
+  };
+  fields.type.append(el('option', { value: 'trunking' }, 'Trunking'), el('option', { value: 'conduit' }, 'Conduit'));
+  fields.type.value = route.type;
+  fields.notes.value = route.notes || '';
+  const apply = () => applyRouteFields(route, fields, length);
+  for (const [labelText, input] of [['Type', fields.type], ['Start (mm)', fields.start], ['End (mm)', fields.end], ['Height (mm)', fields.height], ['Notes', fields.notes]]) {
+    box.appendChild(el('label', {}, labelText));
+    box.appendChild(input);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply(); } });
+  }
+  const go = el('button', { class: 'btn-primary', 'data-testid': 'route-apply' }, 'Apply');
+  go.addEventListener('click', apply);
+  box.appendChild(go);
+  box.appendChild(el('p', { class: 'field-note', 'data-testid': 'containment-warning' }, CONTAINMENT_WARNING));
+  const remove = el('button', { class: 'btn-danger', 'data-testid': 'route-remove' }, 'Remove run');
+  remove.addEventListener('click', () => {
+    const id = route.id;
+    const name = Routes.routeLabel(route);
+    const prior = snapshot();
+    commit(() => { C.removeRoute(job, id); }, { exact: true });
+    if (snapshot() === prior) return;
+    selectedRoute = null;
+    toast(`Removed ${name}. Undo brings it back.`);
+    renderAll();
+  });
+  box.appendChild(remove);
+}
+function applyRouteFields(route, fields, length) {
+  const start = readWholeMm(fields.start);
+  const end = readWholeMm(fields.end);
+  const height = readWholeMm(fields.height);
+  if (start === null || end === null || height === null) { toast('Enter whole millimetres.'); return; }
+  const spec = {
+    type: fields.type.value,
+    wall: route.wall,
+    face: route.face,
+    startMm: start,
+    endMm: end,
+    heightMm: height,
+    notes: fields.notes.value.slice(0, 200),
+  };
+  if (spec.type === route.type && spec.startMm === route.startMm && spec.endMm === route.endMm
+    && spec.heightMm === route.heightMm && spec.notes === route.notes) {
+    toast('Nothing changed.');
+    return;
+  }
+  const blocked = clipRefusal(spec);
+  if (blocked) { toast(blocked); renderAll(); return; }
+  if (start < 0 || end > length || start >= end) {
+    toast(`Keep the run on this wall, which is ${(length / 1000).toFixed(2)} m long.`);
+    renderAll();
+    return;
+  }
+  if (end - start < 50) { toast('A run must be at least 50 mm long.'); renderAll(); return; }
+  const ceiling = C.ceilingHeightMm(job.room);
+  if (height < 0 || height > ceiling) { toast(`Height must be 0 to ${ceiling} mm.`); renderAll(); return; }
+  const prior = snapshot();
+  commit(() => { C.replaceRoute(job, route.id, spec); }, { exact: true });
+  if (snapshot() === prior) return;
+  toast(`Updated ${Routes.routeLabel(routeById(route.id) || route)}.`);
 }
 
 // "Set height for several" panel: count, removable rows, current-height summary,
@@ -1777,6 +2672,8 @@ function renderInspector() {
   if (multiIds) { inspectorMultiPanel(); return; }
   const item = job.items.find(i => i.id === selectedId);
   if (!item) {
+    if (selectedRoute && routeById(selectedRoute)) { inspectorRoutePanel(); return; }
+    if (selectedWall) { inspectorWallPanel(); return; }
     if (activeZone()) { inspectorZonePanel(); return; }
     inspectorRoomPanel();
     return;
@@ -1830,11 +2727,33 @@ function renderInspector() {
     wallSel.appendChild(el('option', { value: C.CEILING }, 'Ceiling'));
   } else {
     for (const w of C.WALLS) wallSel.appendChild(el('option', { value: w }, `Wall ${w}`));
+    for (const face of F.wholeFloorFaces(job)) {
+      if (!face.interior) continue;
+      wallSel.appendChild(el('option', { value: face.view }, face.sideLabel));
+    }
   }
-  wallSel.value = item.wall;
+  wallSel.value = Walls.isWallId(item.wall) && item.face ? `${item.wall}.${item.face}` : item.wall;
   label('Wall');
   box.appendChild(wallSel);
-  wallSel.addEventListener('change', () => commit(() => { item.wall = wallSel.value; C.clampItem(job, item); }));
+  wallSel.addEventListener('change', () => commit(() => {
+    const parsed = Walls.parseFaceView(wallSel.value);
+    if (item.type === 'downlight') {
+      item.wall = C.CEILING;
+      delete item.face;
+      return;
+    }
+    if (parsed) {
+      const wall = wallRecord(parsed.id);
+      const err = Walls.placementError(wall, item.fromLeftMm, item.heightMm, parsed.face, C.ceilingHeightMm(job.room));
+      if (err) throw new Error(err);
+      item.wall = parsed.id;
+      item.face = parsed.face;
+      return;
+    }
+    item.wall = wallSel.value;
+    delete item.face;
+    C.clampItem(job, item);
+  }, { exact: true }));
 
   const mkNum = (idAttr, text, key) => {
     label(text);
@@ -1970,17 +2889,25 @@ function renderAll() {
   // drawing mid-gesture and the drag would land far from the finger. The lift's
   // renderAll unfolds it instead.
   const zNow = activeZone();
-  if (zNow && view !== 'PLAN' && !F.positiveFaces(job.room, zNow).some(face => face.wall === view)) view = 'PLAN';
-  if (!dragFitting && !zoneEdgeDrag && !panning) {
+  if (selectedWall && !wallRecord(selectedWall) && !C.WALLS.includes(selectedWall)) selectedWall = null;
+  if (view !== 'PLAN' && !scopeFaces().some(face => face.view === view)) view = 'PLAN';
+  if (selectedRoute && !routeById(selectedRoute)) selectedRoute = null;
+  if (selectedRoute && !routeInScope(routeById(selectedRoute))) selectedRoute = null;
+  if (mode === 'build' && paletteView !== view) buildPalette();
+  if (!dragFitting && !zoneEdgeDrag && !wallDrag && !routeDrag && !panning) {
     if (selectedId && selectedId !== lastDetailsId && mode === 'select' && !PHONE.matches && !multiIds) inspectorCollapsed = false;
-    if (!selectedId && zoneId && zoneId !== lastZoneDetails && !PHONE.matches && !multiIds) inspectorCollapsed = false;
+    if (!selectedId && selectedRoute && selectedRoute !== lastRouteDetails && mode === 'select' && !PHONE.matches && !multiIds) inspectorCollapsed = false;
+    if (!selectedId && !selectedRoute && selectedWall && selectedWall !== lastWallDetails && mode === 'select' && !PHONE.matches && !multiIds) inspectorCollapsed = false;
+    if (!selectedId && !selectedRoute && !selectedWall && zoneId && zoneId !== lastZoneDetails && !PHONE.matches && !multiIds) inspectorCollapsed = false;
     lastDetailsId = selectedId;
     lastZoneDetails = zoneId;
+    lastWallDetails = selectedWall;
+    lastRouteDetails = selectedRoute;
   }
   // A rebuild of the same panel (a save, a layer change) keeps the reader's
   // scroll position; a different panel starts at the top.
   const insBox = $('#inspector');
-  const insKey = `${currentId}|${selectedId}|${zoneId || ''}|${multiIds ? 'multi' : ''}|${inspectorCollapsed}`;
+  const insKey = `${currentId}|${selectedId}|${selectedRoute || ''}|${selectedWall || ''}|${zoneId || ''}|${multiIds ? 'multi' : ''}|${inspectorCollapsed}`;
   const keepTop = insKey === lastInspectorKey ? insBox.scrollTop : 0;
   lastInspectorKey = insKey;
   renderTabs(); renderLayers(); renderCanvas(); renderInspector(); renderQuote();
@@ -1994,6 +2921,8 @@ function renderAll() {
 function syncFooterHeight() {
   const bar = $('#quote-bar');
   if (bar) document.documentElement.style.setProperty('--footer-h', (bar.offsetHeight + 2) + 'px');
+  const top = $('#topbar');
+  if (top) document.documentElement.style.setProperty('--topbar-h', top.offsetHeight + 'px');
   // the floating tool dock (layout A) starts below the view tabs, which wrap
   const tabs = $('#view-tabs');
   if (tabs) document.documentElement.style.setProperty('--tabs-h', tabs.offsetHeight + 'px');
@@ -2038,12 +2967,21 @@ function openRoomForm() {
           }
           vals[k] = Math.round(v * 100) / 100;
         }
-        const zoneBlock = F.outsideFloorMessage(job, vals.widthM, vals.depthM);
+        const zoneBlock = F.outsideFloorMessage(job, vals.widthM, vals.depthM, vals.heightM);
         if (zoneBlock) { errP.hidden = false; errP.textContent = zoneBlock; return; }
         const outside = C.itemsOutside(job, vals.widthM, vals.depthM, vals.heightM);
         if (outside.length) { closeModal(); askShrink(vals, outside); return; }
-        commit(() => { job.room = vals; });
+        const oldSpan = roomMm();
+        const wallsBefore = interiorWalls().map(w => ({ ...w }));
+        const ok = commit(() => { job.room = vals; });
         closeModal();
+        if (!ok) return;
+        const nextSpan = roomMm();
+        if (nextSpan.W > oldSpan.W || nextSpan.D > oldSpan.D) {
+          const left = wallsBefore.filter(w => reachesOutside(w, oldSpan.W, oldSpan.D) && !reachesOutside(w, nextSpan.W, nextSpan.D)).map(w => w.id);
+          if (left.length === 1) toast(`${left[0]} no longer reaches the outside wall.`);
+          else if (left.length) toast(`${englishList(left)} no longer reach the outside wall.`);
+        }
       },
     },
   ], isEdited, 'You have edited the room size.');
@@ -2219,10 +3157,272 @@ function downloadBackup() {
 function downloadCsv() { download(`${jobSlug()}-labour.csv`, C.jobCsv(job), 'text/csv'); }
 
 // ---- Print pack -----------------------------------------------------------------
-// layers: null prints the whole job (default). A Set of layer ids limits the
-// drawing pages and their fitting lists to those layers; the labour page always
-// covers the whole job. Either way the job itself is never copied or changed.
-function buildPrintPack(includeInk = true, layers = null) {
+// layers: null prints every fitting (default). A Set limits the drawings and
+// their tables; the labour page always covers the whole job. sheetChoice null
+// means Whole floor, which is also what the browser print menu uses.
+// The job, selection, layers and history are not written.
+function printLegend() {
+  const legend = el('p', { style: 'font-size:9.5pt', 'data-testid': 'print-legend' });
+  legend.textContent = Object.values(C.TYPES).map(t => `${t.symbol} = ${t.label}`).join(' · ')
+    + ' · downlights shown dashed on the ceiling · T trunking (solid band), C conduit (dashed line). '
+    + CONTAINMENT_WARNING;
+  return legend;
+}
+function fittingTable(items, ceilingCoords = false) {
+  if (!items.length && !ceilingCoords) {
+    return el('p', { 'data-testid': 'print-no-fittings' }, 'No fittings on this wall.');
+  }
+  const t = el('table');
+  const head = el('tr');
+  const cols = ceilingCoords ? ['ID', 'Type', 'x (mm)', 'y (mm)', 'Notes'] : ['ID', 'Type', 'From left (mm)', 'Height (mm)', 'Notes'];
+  for (const h of cols) head.appendChild(el('th', {}, h));
+  const thead = el('thead');
+  thead.appendChild(head);
+  const body = el('tbody');
+  for (const it of items) {
+    const tr = el('tr');
+    tr.append(el('td', {}, it.id), el('td', {}, C.TYPES[it.type].label),
+      el('td', {}, it.wall === C.CEILING ? `x ${it.fromLeftMm}` : String(it.fromLeftMm)),
+      el('td', {}, it.wall === C.CEILING ? `y ${it.heightMm}` : String(it.heightMm)),
+      el('td', {}, it.notes || ''));
+    body.appendChild(tr);
+  }
+  t.append(thead, body);
+  return t;
+}
+function appendLabour(page, layers, hiddenN) {
+  page.appendChild(el('h2', {}, 'Labour breakdown — whole job, all layers'));
+  if (layers) page.appendChild(el('p', { class: 'print-scope' }, `This page covers every fitting on every layer, including the ${hiddenN} not drawn on the earlier pages.`));
+  const bd = C.breakdown(job);
+  const t = el('table');
+  const head = el('tr');
+  for (const h of ['Work type', 'Qty', 'Rate', 'Line total', 'Status']) head.appendChild(el('th', {}, h));
+  const thead = el('thead');
+  thead.appendChild(head);
+  const body = el('tbody');
+  for (const r of bd.rows) {
+    const tr = el('tr');
+    tr.append(el('td', {}, r.label), el('td', {}, String(r.qty)),
+      el('td', {}, r.ratePence === null ? '—' : C.formatPence(r.ratePence)),
+      el('td', {}, r.linePence === null ? '—' : C.formatPence(r.linePence)),
+      el('td', {}, r.status));
+    body.appendChild(tr);
+  }
+  if (bd.unknownQty) {
+    const tr = el('tr');
+    tr.append(el('td', {}, C.TYPES.unknown.label), el('td', {}, String(bd.unknownQty)), el('td', {}, '—'), el('td', {}, '—'), el('td', {}, 'unpriced'));
+    body.appendChild(tr);
+  }
+  if (bd.existingQty) {
+    const tr = el('tr');
+    tr.append(el('td', {}, C.TYPES.existing.label), el('td', {}, String(bd.existingQty)), el('td', {}, '—'), el('td', {}, '—'), el('td', {}, 'excluded — no work'));
+    body.appendChild(tr);
+  }
+  t.append(thead, body);
+  page.appendChild(t);
+  page.appendChild(el('p', {}, bd.complete ? `Total ${C.formatPence(bd.totalPence)}` : `Total so far ${C.formatPence(bd.totalPence)} — incomplete, ${C.unpricedPhrase(bd.unpricedCount)}`));
+  page.appendChild(el('p', { class: 'disclaimer' }, 'Prototype with example labour rates only. Not a quotation, electrical design or installation advice. Cable and material costs are not included.'));
+  page.appendChild(el('p', { class: 'disclaimer' }, 'Tested with simulated pen and touch. Not yet tried on a real Surface; palm rejection unverified.'));
+}
+function stampPrintFooters(pack) {
+  const pages = pack.querySelectorAll('.page');
+  pages.forEach((p, i) => p.appendChild(el('p', { class: 'print-footer', style: 'font-size:9pt;text-align:right' }, `Page ${i + 1} of ${pages.length}`)));
+}
+function fittingsForSheet(sheet, show) {
+  return job.items.filter(item => {
+    if (!show(item) || item.wall !== sheet.wall) return false;
+    if (Walls.isWallId(item.wall) && item.face !== sheet.face) return false;
+    return item.fromLeftMm >= sheet.fromMm && item.fromLeftMm <= sheet.toMm;
+  });
+}
+function clipRouteMm(route, sheet) {
+  const a = Math.min(route.startMm, route.endMm);
+  const b = Math.max(route.startMm, route.endMm);
+  const from = Math.max(a, sheet.fromMm);
+  const to = Math.min(b, sheet.toMm);
+  if (to <= from) return null;
+  return [from, to];
+}
+function routesForSheet(sheet) {
+  // Every run on this face is drawn. Print does not read or write the on-screen
+  // containment toggles. Runs stay out of the labour breakdown and the CSV,
+  // which both use C.breakdown / C.jobCsv (fittings only).
+  return routesOf().filter(route => {
+    if (!route || route.wall !== sheet.wall || route.face !== sheet.face) return false;
+    return !!clipRouteMm(route, sheet);
+  });
+}
+function paintPrintRoute(parent, route, x1, y1, x2, y2, testid, extra) {
+  const g = svgEl('g', { 'data-testid': testid, 'data-route': route.id, 'data-type': route.type, ...extra }, parent);
+  if (route.type === 'trunking') {
+    svgEl('line', { x1, y1, x2, y2, stroke: '#7a5200', 'stroke-width': 70 }, g);
+    svgEl('line', { x1, y1, x2, y2, stroke: '#f2b84b', 'stroke-width': 46 }, g);
+  } else {
+    svgEl('line', { x1, y1, x2, y2, stroke: '#1d5fa8', 'stroke-width': 28, 'stroke-dasharray': '90 50' }, g);
+  }
+  const label = svgEl('text', {
+    x: (Number(x1) + Number(x2)) / 2, y: Math.min(Number(y1), Number(y2)) - 80,
+    'text-anchor': 'middle', 'font-size': 180, 'font-weight': '700', fill: '#1a1a1a', 'font-family': 'inherit',
+  }, g);
+  label.textContent = Routes.routeLabel(route);
+  return g;
+}
+function keySegment(sheet, dims) {
+  if (Walls.isWallId(sheet.wall)) {
+    const wall = wallRecord(sheet.wall);
+    if (!wall) return null;
+    const a = Walls.planFromOffset(wall, sheet.face, sheet.fromMm);
+    const b = Walls.planFromOffset(wall, sheet.face, sheet.toMm);
+    if (!a || !b) return null;
+    return { x1: a.x, y1: a.y, x2: b.x, y2: b.y };
+  }
+  return faceMark(sheet, dims);
+}
+function renderPrintKey(sheet, dims, show) {
+  const { W, D } = dims;
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('class', 'print-key');
+  svg.setAttribute('data-testid', 'print-key');
+  svg.setAttribute('viewBox', `-500 -500 ${W + 1000} ${D + 1000}`);
+  svgEl('rect', { x: 0, y: 0, width: W, height: D, fill: '#fff', stroke: '#1a1a1a', 'stroke-width': 25 }, svg);
+  for (const zone of F.zonesOf(job)) {
+    svgEl('rect', {
+      x: zone.x0, y: zone.y0, width: Math.max(0, zone.x1 - zone.x0), height: Math.max(0, zone.y1 - zone.y0),
+      fill: 'rgba(35,50,77,0.08)', stroke: '#7d8da6', 'stroke-width': 18,
+    }, svg);
+  }
+  for (const wall of interiorWalls()) {
+    svgEl('line', { x1: wall.x1, y1: wall.y1, x2: wall.x2, y2: wall.y2, stroke: '#1a1a1a', 'stroke-width': 28 }, svg);
+  }
+  const red = keySegment(sheet, dims);
+  if (red) {
+    svgEl('line', {
+      x1: red.x1, y1: red.y1, x2: red.x2, y2: red.y2,
+      stroke: '#d00000', 'stroke-width': 240, 'data-testid': 'print-key-wall',
+    }, svg);
+  }
+  const nudge = { N: [0, -120], S: [0, 120], E: [120, 0], W: [-120, 0] };
+  for (const route of routesForSheet(sheet)) {
+    const span = clipRouteMm(route, sheet);
+    const wall = Routes.wallGeometry(job, route.wall);
+    if (!span || !wall) continue;
+    const a = Walls.planFromOffset(wall, route.face, span[0]);
+    const b = Walls.planFromOffset(wall, route.face, span[1]);
+    if (!a || !b) continue;
+    const shift = nudge[route.face] || [0, 0];
+    paintPrintRoute(svg, route, a.x + shift[0], a.y + shift[1], b.x + shift[0], b.y + shift[1], 'print-key-route', {
+      'data-plan-x1': String(a.x), 'data-plan-y1': String(a.y), 'data-plan-x2': String(b.x), 'data-plan-y2': String(b.y),
+    });
+  }
+  for (const item of fittingsForSheet(sheet, show)) {
+    const p = planPos(item);
+    const inset = Walls.isWallId(item.wall)
+      ? { N: [0, -260], S: [0, 260], E: [260, 0], W: [-260, 0] }[item.face] || [0, 0]
+      : { A: [0, 260], B: [-260, 0], C: [0, -260], D: [260, 0] }[item.wall] || [0, 0];
+    const g = fittingGlyph(item, p.x + inset[0], p.y + inset[1], item.wall !== 'C');
+    g.setAttribute('data-testid', 'print-key-fitting');
+    g.setAttribute('data-plan-x', String(p.x));
+    g.setAttribute('data-plan-y', String(p.y));
+    g.setAttribute('data-from-left', String(item.fromLeftMm));
+    svg.appendChild(g);
+  }
+  return svg;
+}
+function renderPrintElevation(sheet, dims, show, includeInk) {
+  const H = dims.H;
+  const x0 = sheet.fromMm;
+  const x1 = sheet.toMm;
+  const span = Math.max(1, x1 - x0);
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('class', 'print-elevation');
+  svg.setAttribute('data-testid', 'print-elevation');
+  svg.setAttribute('viewBox', `${x0 - 800} -800 ${span + 1800} ${H + 1600}`);
+  svgEl('rect', { x: x0, y: 0, width: span, height: H, fill: '#fff', stroke: '#1a1a1a', 'stroke-width': 25 }, svg);
+  svgEl('line', { x1: x0, y1: H, x2: x1, y2: H, stroke: '#1a1a1a', 'stroke-width': 40 }, svg);
+  const heightLabel = svgEl('text', {
+    x: x1 + 380, y: H / 2, 'font-size': 240, fill: '#555', 'font-family': 'inherit', 'text-anchor': 'middle',
+    transform: `rotate(-90 ${x1 + 380} ${H / 2})`,
+  }, svg);
+  heightLabel.textContent = `${job.room.heightM.toFixed(2)} m`;
+  for (const mm of [x0, x1]) {
+    svgEl('line', { x1: mm, y1: H, x2: mm, y2: H + 120, stroke: '#23324d', 'stroke-width': 12 }, svg);
+    const tick = svgEl('text', { x: mm, y: H + 280, 'font-size': 160, fill: '#23324d', 'text-anchor': 'middle', 'font-family': 'inherit', 'data-testid': 'print-ruler' }, svg);
+    tick.textContent = `${(mm / 1000).toFixed(2)} m`;
+  }
+  if (x0 > 0) {
+    const c = svgEl('text', { x: x0, y: -80, 'font-size': 180, fill: '#555', 'font-family': 'inherit', 'data-testid': 'print-continues' }, svg);
+    c.textContent = 'Wall continues';
+  }
+  if (x1 < sheet.lengthMm) {
+    const c = svgEl('text', { x: x1, y: -80, 'font-size': 180, fill: '#555', 'text-anchor': 'end', 'font-family': 'inherit', 'data-testid': 'print-continues' }, svg);
+    c.textContent = 'Wall continues';
+  }
+  for (const boundary of sheet.boundaries) {
+    svgEl('line', {
+      x1: boundary.atMm, y1: 0, x2: boundary.atMm, y2: H,
+      stroke: '#1a1a1a', 'stroke-width': 16, 'stroke-dasharray': '70 40',
+      'data-testid': 'print-zone-boundary', 'data-at': String(boundary.atMm),
+    }, svg);
+    const paintSide = (names, side) => {
+      if (!names || !names.length) return;
+      const label = svgEl('text', {
+        x: boundary.atMm + (side === 'left' ? -70 : 70), y: -80,
+        'text-anchor': side === 'left' ? 'end' : 'start',
+        'font-size': 170, fill: '#1a1a1a', 'font-family': 'inherit',
+        'data-testid': 'print-zone-boundary-label', 'data-side': side,
+      }, svg);
+      label.textContent = names.join(', ');
+    };
+    const left = boundary.left || [];
+    const right = boundary.right || [];
+    if (left.length || right.length) {
+      paintSide(left, 'left');
+      paintSide(right, 'right');
+    } else if (boundary.names && boundary.names.length) {
+      paintSide(boundary.names, 'right');
+    }
+  }
+  for (const item of fittingsForSheet(sheet, show)) {
+    const g = fittingGlyph(item, item.fromLeftMm, H - item.heightMm);
+    g.setAttribute('data-testid', 'print-elevation-fitting');
+    g.setAttribute('data-from-left', String(item.fromLeftMm));
+    g.setAttribute('data-height', String(item.heightMm));
+    svg.appendChild(g);
+  }
+  for (const route of routesForSheet(sheet)) {
+    const spanMm = clipRouteMm(route, sheet);
+    if (!spanMm) continue;
+    const y = H - route.heightMm;
+    paintPrintRoute(svg, route, spanMm[0], y, spanMm[1], y, 'print-elevation-route', {
+      'data-from': String(spanMm[0]), 'data-to': String(spanMm[1]),
+    });
+  }
+  if (includeInk) {
+    const annoKey = sheet.interior ? sheet.view : sheet.wall;
+    for (const s of job.annotations[annoKey] || []) {
+      svgEl('polyline', {
+        points: s.points.map(pt => pt.join(',')).join(' '),
+        fill: 'none', stroke: '#2266cc', 'stroke-width': 25, 'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+      }, svg);
+    }
+  }
+  return svg;
+}
+function drawFullPlan(parent, dims, show) {
+  const savedZone = zoneId;
+  const savedView = view;
+  zoneId = null;
+  view = 'PLAN';
+  try { renderPlan(parent, dims, show); }
+  finally { zoneId = savedZone; view = savedView; }
+}
+function buildPrintPack(includeInk = true, layers = null, sheetChoice = null) {
+  if (window.__SURFACE_TEST__ && window.__SURFACE_TEST__.printIncludeInk === false) includeInk = false;
+  const choice = sheetChoice || { whole: true, zoneIds: [] };
+  if (choice.whole && Print.useLegacyPack(job)) buildLegacyPrintPack(includeInk, layers);
+  else buildZonePrintPack(includeInk, layers, choice);
+}
+function buildLegacyPrintPack(includeInk = true, layers = null) {
   const pack = $('#print-pack');
   pack.innerHTML = '';
   const show = layers ? (it) => layers.has(C.layerOf(it)) : () => true;
@@ -2252,106 +3452,159 @@ function buildPrintPack(includeInk = true, layers = null) {
     if (viewName === 'PLAN') {
       vbW = dims.W + 1600; vbH = dims.D + 1600;
       svg.setAttribute('viewBox', `-800 -800 ${vbW} ${vbH}`);
-      if (!includeInk) job.annotations.PLAN.forEach(() => { });
-      const saved = job.annotations.PLAN; if (!includeInk) job.annotations.PLAN = [];
-      renderPlan(tmpWorld, dims, show);
-      if (!includeInk) job.annotations.PLAN = saved;
+      const saved = job.annotations.PLAN;
+      try {
+        if (!includeInk) job.annotations.PLAN = [];
+        renderPlan(tmpWorld, dims, show);
+      } finally {
+        if (!includeInk) job.annotations.PLAN = saved;
+      }
     } else {
       const L = (viewName === 'A' || viewName === 'C') ? dims.W : dims.D;
       vbW = L + 1600; vbH = dims.H + 1600;
       svg.setAttribute('viewBox', `-800 -800 ${vbW} ${vbH}`);
-      const saved = job.annotations[viewName]; if (!includeInk) job.annotations[viewName] = [];
-      renderWall(tmpWorld, viewName, dims, true, show);
-      if (!includeInk) job.annotations[viewName] = saved;
+      const saved = job.annotations[viewName];
+      try {
+        if (!includeInk) job.annotations[viewName] = [];
+        renderWall(tmpWorld, viewName, dims, true, show);
+      } finally {
+        if (!includeInk) job.annotations[viewName] = saved;
+      }
     }
     while (tmpWorld.firstChild) svg.appendChild(tmpWorld.firstChild);
     return svg;
   };
-  const itemTable = (items, ceilingCoords = false) => {
-    const t = el('table');
-    const head = el('tr');
-    // ceiling fittings store plan x/y, not a mounting height
-    const cols = ceilingCoords ? ['ID', 'Type', 'x (mm)', 'y (mm)', 'Notes'] : ['ID', 'Type', 'From left (mm)', 'Height (mm)', 'Notes'];
-    for (const h of cols) head.appendChild(el('th', {}, h));
-    t.appendChild(head);
-    for (const it of items) {
-      const tr = el('tr');
-      tr.append(el('td', {}, it.id), el('td', {}, C.TYPES[it.type].label),
-        el('td', {}, it.wall === C.CEILING ? `x ${it.fromLeftMm}` : String(it.fromLeftMm)),
-        el('td', {}, it.wall === C.CEILING ? `y ${it.heightMm}` : String(it.heightMm)),
-        el('td', {}, it.notes || ''));
-      t.appendChild(tr);
-    }
-    return t;
-  };
 
-  // Page 1: plan, legend, room, notes
   const p1 = mkPage(drawScope);
   p1.appendChild(el('h2', {}, layers ? `Floor plan — ${C.visibilityLabel(layers)} only` : 'Floor plan — all layers'));
   scopeNote(p1);
   p1.appendChild(svgFor('PLAN'));
-  const legend = el('p', { style: 'font-size:9.5pt' });
-  legend.textContent = Object.values(C.TYPES).map(t => `${t.symbol} = ${t.label}`).join(' · ') + ' · downlights shown dashed on the ceiling';
-  p1.appendChild(legend);
+  p1.appendChild(printLegend());
   p1.appendChild(el('h2', {}, 'Room and job notes'));
   p1.appendChild(el('p', {}, `${job.room.widthM.toFixed(2)} × ${job.room.depthM.toFixed(2)} × ${job.room.heightM.toFixed(2)} m (w × d × h)`));
   p1.appendChild(el('p', {}, job.jobNotes || '(no job notes)'));
 
-  // Pages 2–3: two walls per page
   let page = null;
   C.WALLS.forEach((w, idx) => {
-    if (idx % 2 === 0) { page = mkPage(drawScope); scopeNote(page); }
+    if (idx % 2 === 0) {
+      page = mkPage(drawScope);
+      page.classList.add('legacy-walls');
+      scopeNote(page);
+    }
     page.appendChild(el('h2', {}, layers ? `Wall ${w} — ${C.visibilityLabel(layers)} only` : `Wall ${w}`));
     page.appendChild(svgFor(w));
-    page.appendChild(itemTable(job.items.filter(i => i.wall === w && show(i))));
+    page.appendChild(fittingTable(job.items.filter(i => i.wall === w && show(i))));
   });
-  // ceiling items table appended to wall D page
   const ceil = job.items.filter(i => i.wall === C.CEILING && show(i));
   if (ceil.length) {
     page.appendChild(el('h2', {}, 'Ceiling fittings'));
-    page.appendChild(itemTable(ceil, true));
+    page.appendChild(fittingTable(ceil, true));
   }
 
-  // Last page: labour breakdown, always the whole job
   const pL = mkPage('Whole job, all layers');
-  pL.appendChild(el('h2', {}, 'Labour breakdown — whole job, all layers'));
-  if (layers) pL.appendChild(el('p', { class: 'print-scope' }, `This page covers every fitting on every layer, including the ${hiddenN} not drawn on the earlier pages.`));
-  const bd = C.breakdown(job);
-  const t = el('table');
-  const head = el('tr');
-  for (const h of ['Work type', 'Qty', 'Rate', 'Line total', 'Status']) head.appendChild(el('th', {}, h));
-  t.appendChild(head);
-  for (const r of bd.rows) {
-    const tr = el('tr');
-    tr.append(el('td', {}, r.label), el('td', {}, String(r.qty)),
-      el('td', {}, r.ratePence === null ? '—' : C.formatPence(r.ratePence)),
-      el('td', {}, r.linePence === null ? '—' : C.formatPence(r.linePence)),
-      el('td', {}, r.status));
-    t.appendChild(tr);
-  }
-  if (bd.unknownQty) {
-    const tr = el('tr');
-    tr.append(el('td', {}, C.TYPES.unknown.label), el('td', {}, String(bd.unknownQty)), el('td', {}, '—'), el('td', {}, '—'), el('td', {}, 'unpriced'));
-    t.appendChild(tr);
-  }
-  if (bd.existingQty) {
-    const tr = el('tr');
-    tr.append(el('td', {}, C.TYPES.existing.label), el('td', {}, String(bd.existingQty)), el('td', {}, '—'), el('td', {}, '—'), el('td', {}, 'excluded — no work'));
-    t.appendChild(tr);
-  }
-  pL.appendChild(t);
-  pL.appendChild(el('p', {}, bd.complete ? `Total ${C.formatPence(bd.totalPence)}` : `Total so far ${C.formatPence(bd.totalPence)} — incomplete, ${C.unpricedPhrase(bd.unpricedCount)}`));
-  pL.appendChild(el('p', { class: 'disclaimer' }, 'Prototype with example labour rates only. Not a quotation, electrical design or installation advice. Cable and material costs are not included.'));
-  pL.appendChild(el('p', { class: 'disclaimer' }, 'Tested with simulated pen and touch. Not yet tried on a real Surface; palm rejection unverified.'));
+  appendLabour(pL, layers, hiddenN);
+  stampPrintFooters(pack);
+}
+function buildZonePrintPack(includeInk, layers, choice) {
+  const pack = $('#print-pack');
+  pack.innerHTML = '';
+  const show = layers ? (it) => layers.has(C.layerOf(it)) : () => true;
+  const drawScope = layers ? `Drawings: ${C.visibilityLabel(layers)} only` : 'All layers';
+  const hiddenLayers = layers ? C.LAYERS.filter(l => !layers.has(l)).map(l => C.LAYER_LABELS[l]) : [];
+  const hiddenN = job.items.filter(it => !show(it)).length;
+  const dims = roomMm();
+  const dateStr = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  const savedStr = job.savedAt ? `saved ${new Date(job.savedAt).toLocaleString('en-GB')}` : 'not yet saved';
+  const plan = Print.planSheets(job, choice);
+  const mkPage = (scope) => {
+    const p = el('div', { class: 'page' });
+    const h = el('div', { class: 'print-header' });
+    h.append(el('strong', {}, `${job.name} — prototype, example rates`), el('span', {}, `${scope} · revision ${job.revision} · ${savedStr} · printed ${dateStr}`));
+    p.appendChild(h);
+    pack.appendChild(p);
+    return p;
+  };
+  const scopeNote = (page) => {
+    if (!layers) return;
+    page.appendChild(el('p', { class: 'print-scope' },
+      `These drawings show ${C.visibilityLabel(layers)} only. Not drawn: ${hiddenLayers.join(', ')} (${hiddenN} fitting${hiddenN === 1 ? '' : 's'}), still included in the labour breakdown. Sketches are shared by all layers.`));
+  };
 
-  // page footers
-  const pages = pack.querySelectorAll('.page');
-  pages.forEach((p, i) => p.appendChild(el('p', { style: 'font-size:9pt;text-align:right' }, `Page ${i + 1} of ${pages.length}`)));
+  const overview = mkPage(drawScope);
+  overview.dataset.testid = 'print-overview';
+  overview.appendChild(el('h2', {}, 'Floor overview'));
+  overview.appendChild(el('p', { 'data-testid': 'print-layer-label' }, drawScope));
+  scopeNote(overview);
+  const planSvg = document.createElementNS(NS, 'svg');
+  planSvg.setAttribute('data-testid', 'print-overview-plan');
+  planSvg.setAttribute('viewBox', `-800 -800 ${dims.W + 1600} ${dims.D + 1600}`);
+  const dropInk = !includeInk;
+  const savedPlan = job.annotations.PLAN;
+  try {
+    if (dropInk) job.annotations.PLAN = [];
+    if (dropInk && window.__SURFACE_TEST__ && window.__SURFACE_TEST__.throwDuringPrint) {
+      throw new Error('print draw failed');
+    }
+    drawFullPlan(planSvg, dims, show);
+  } finally {
+    if (dropInk) job.annotations.PLAN = savedPlan;
+  }
+  overview.appendChild(planSvg);
+  overview.appendChild(printLegend());
+  overview.appendChild(el('p', {}, `${job.room.widthM.toFixed(2)} × ${job.room.depthM.toFixed(2)} × ${job.room.heightM.toFixed(2)} m (w × d × h)`));
+  const zones = F.zonesOf(job);
+  if (zones.length) {
+    const list = el('ol', { 'data-testid': 'print-zones' });
+    for (const zone of zones) {
+      list.appendChild(el('li', {}, `${zone.name}: ${(zone.x0 / 1000).toFixed(2)} to ${(zone.x1 / 1000).toFixed(2)} m from the west, ${(zone.y0 / 1000).toFixed(2)} to ${(zone.y1 / 1000).toFixed(2)} m from the north`));
+    }
+    overview.appendChild(list);
+  } else overview.appendChild(el('p', {}, 'No zones on this floor.'));
+  const routes = routesOf().filter(route => route);
+  if (routes.length) {
+    const list = el('ol', { 'data-testid': 'print-routes' });
+    const side = { N: 'north side', E: 'east side', S: 'south side', W: 'west side' };
+    for (const route of routes) {
+      const where = Walls.isWallId(route.wall) ? `${route.wall} ${side[route.face] || route.face}` : `Wall ${route.wall}`;
+      const kind = route.type === 'conduit' ? 'conduit' : 'trunking';
+      list.appendChild(el('li', {}, `${Routes.routeLabel(route)} ${kind} on ${where}, ${Math.min(route.startMm, route.endMm)} to ${Math.max(route.startMm, route.endMm)} mm at ${route.heightMm} mm`));
+    }
+    overview.appendChild(list);
+  } else overview.appendChild(el('p', {}, 'No containment runs on this floor.'));
+  overview.appendChild(el('p', {}, job.jobNotes || '(no job notes)'));
+  // Ceiling fittings stay listed on the overview. Wall sheets do not repeat them.
+  // A layer filter omits hidden rows here; appendLabour still prices every fitting.
+  const ceil = job.items.filter(item => item.wall === C.CEILING && show(item));
+  if (ceil.length) {
+    overview.appendChild(el('h2', {}, 'Ceiling fittings'));
+    overview.appendChild(fittingTable(ceil, true));
+  }
+
+  for (const sheet of plan.sheets) {
+    const page = mkPage(drawScope);
+    page.classList.add('wall-sheet');
+    page.dataset.testid = 'print-wall-sheet';
+    page.dataset.wall = sheet.wall;
+    page.dataset.face = sheet.face;
+    page.appendChild(el('h2', {}, sheet.title));
+    page.appendChild(el('p', { 'data-testid': 'print-subtitle' }, sheet.subtitle));
+    page.appendChild(el('p', { 'data-testid': 'print-layer-label' }, drawScope));
+    scopeNote(page);
+    page.appendChild(renderPrintKey(sheet, dims, show));
+    page.appendChild(printLegend());
+    page.appendChild(renderPrintElevation(sheet, dims, show, includeInk));
+    page.appendChild(fittingTable(fittingsForSheet(sheet, show)));
+  }
+
+  const labour = mkPage('Whole job, all layers');
+  labour.dataset.testid = 'print-labour';
+  appendLabour(labour, layers, hiddenN);
+  stampPrintFooters(pack);
 }
 
 function openPrint() {
   const box = el('div');
-  box.appendChild(el('p', {}, 'Prints the plan, all four wall views with fittings, and the labour breakdown.'));
+  box.appendChild(el('p', {}, 'Prints a floor overview, the wall sheets you tick, and the labour breakdown.'));
   const choice = (value, text, checked, disabled) => {
     const r = el('input', { type: 'radio', name: 'print-scope', value, 'data-testid': `print-scope-${value}` });
     r.checked = checked; r.disabled = disabled;
@@ -2367,18 +3620,59 @@ function openPrint() {
       ? `Drawings: shown layers only (${C.visibilityLabel(shownLayers)})`
       : 'Drawings: shown layers only (hide a layer first to use this)',
     false, !canFilter);
-  box.appendChild(el('p', { style: 'font-size:14px' }, 'The labour breakdown always covers the whole job, all layers.'));
-  // Snapshot now so the printed pages match what was chosen here.
+  box.appendChild(el('p', { style: 'font-size:14px', 'data-testid': 'print-breakdown-note' }, 'The labour breakdown always covers the whole job, all layers.'));
+  // UX §11: fieldset group under the layer choices and the whole-job note.
+  // Whole floor scope ticks Whole floor. A zone scope ticks that zone only.
+  // Nothing ticked is allowed and prints the overview plus the breakdown.
+  const scoped = activeZone();
+  const sheets = el('fieldset', { class: 'print-sheets', 'data-testid': 'print-sheets' });
+  sheets.appendChild(el('legend', {}, 'Wall sheets'));
+  const wholeBox = el('input', { type: 'checkbox', 'data-testid': 'print-whole' });
+  wholeBox.checked = !scoped;
+  const wholeLbl = el('label', { class: 'print-choice' });
+  wholeLbl.append(wholeBox, el('span', {}, 'Whole floor (every wall, full length)'));
+  sheets.appendChild(wholeLbl);
+  const zoneBoxes = [];
+  for (const zone of F.zonesOf(job)) {
+    const input = el('input', { type: 'checkbox', value: zone.id, 'data-testid': `print-zone-${zone.id}` });
+    input.checked = !!(scoped && scoped.id === zone.id);
+    const lbl = el('label', { class: 'print-choice' });
+    lbl.append(input, el('span', {}, zone.name));
+    sheets.appendChild(lbl);
+    zoneBoxes.push(input);
+  }
+  const countEl = el('p', { class: 'print-sheet-count', 'data-testid': 'print-sheet-count' });
+  sheets.appendChild(countEl);
+  const tickedIds = () => zoneBoxes.filter(input => input.checked).map(input => input.value);
+  const refreshCount = () => {
+    const plan = Print.planSheets(job, { whole: wholeBox.checked, zoneIds: wholeBox.checked ? [] : tickedIds() });
+    countEl.textContent = Print.countLine(plan.sheets.length, plan.sharedWalls);
+  };
+  wholeBox.addEventListener('change', () => {
+    if (wholeBox.checked) zoneBoxes.forEach(input => { input.checked = false; });
+    refreshCount();
+  });
+  for (const input of zoneBoxes) {
+    input.addEventListener('change', () => {
+      if (input.checked) wholeBox.checked = false;
+      refreshCount();
+    });
+  }
+  refreshCount();
+  box.appendChild(sheets);
+  // Snapshot layers now so the printed pages match what was chosen here.
+  // Wall-sheet ticks are read at click, before the dialog is removed.
   const chosen = new Set(shownLayers);
   modal('Print', [box], [
     { label: 'Cancel', fn: closeModal },
     { label: 'Print', class: 'btn-primary', testid: 'print-go', fn: () => {
       const layers = shownR.checked ? chosen : null;
+      const sheetChoice = { whole: wholeBox.checked, zoneIds: wholeBox.checked ? [] : tickedIds() };
       closeModal();
       // wait for the debounced save first, so the header shows a real saved
       // time (bounded: never blocks printing for more than 2 s)
       const t0 = Date.now();
-      const go = () => { printFromDialog = true; buildPrintPack(true, layers); setTimeout(() => window.print(), 50); };
+      const go = () => { printFromDialog = true; buildPrintPack(true, layers, sheetChoice); setTimeout(() => window.print(), 50); };
       const tick = () => (job.savedAt || Date.now() - t0 > 2000) ? go() : setTimeout(tick, 100);
       tick();
     } },
@@ -2498,8 +3792,9 @@ function beginJob(j, prefs = null) {
   clearTimeout(saveTimer);
   refusedNumber = null;
   job = j && j.schemaVersion === 2 ? C.normaliseJobV2(j) : C.normaliseJob(j);
-  history = []; redoStack = []; selectedId = null; zoneId = null; zoneTool = null; zoneGesture = null; view = 'PLAN'; zoom = { s: 1, tx: 0, ty: 0 }; multiIds = null; multiDraft = ''; multiPending = null;
+  history = []; redoStack = []; selectedId = null; selectedRoute = null; selectedWall = null; zoneId = null; zoneTool = null; zoneGesture = null; wallTool = null; wallGesture = null; routeTool = null; routeGesture = null; routeDrag = null; view = 'PLAN'; zoom = { s: 1, tx: 0, ty: 0 }; multiIds = null; multiDraft = ''; multiPending = null;
   shownLayers = new Set(C.LAYERS); layersOpen = false;
+  showContainment = { trunking: true, conduit: true };
   // remembered type and heights belong to this job; copy mode never crosses jobs
   jobPrefs = J.cleanPrefs(prefs);
   placeType = jobPrefs.lastType ?? 'surface';
@@ -3014,6 +4309,7 @@ function explainWideTouch(width) {
 function cancelInteraction() {
   const drag = dragFitting;
   pinch = null; drawingStroke = null; panning = null; dragFitting = null; owner = null; zoneGesture = null; zoneEdgeDrag = null;
+  wallGesture = null; wallDrag = null; routeGesture = null; routeDrag = null;
   multiPending = null; // a cancelled or pinched tap never toggles
   if (drag) { job = C.normaliseJob(JSON.parse(drag.pre)); renderAll(); }
   else renderCanvas();
@@ -3123,6 +4419,10 @@ function grabOffsetFor(id, p) {
   if (!it) return { dL: 0, dH: 0 };
   if (view === 'PLAN') {
     if (it.wall === C.CEILING) return { dL: p.x - it.fromLeftMm, dH: p.y - it.heightMm };
+    if (Walls.isWallId(it.wall)) {
+      const at = planPos(it);
+      return { dL: p.x - at.x, dH: p.y - at.y };
+    }
     const wp = wallParamsFromPlan(p.x, p.y, it.wall);
     return wp ? { dL: wp.fromLeft - it.fromLeftMm, dH: 0 } : { dL: 0, dH: 0 };
   }
@@ -3176,10 +4476,22 @@ $('#canvas').addEventListener('pointerdown', (e) => {
   const hitFitting = hits.length ? hits[0] : null;
   if (fingerOnly && (mode !== 'select' || hitFitting)) explainFingerPan();
 
+  if (mode === 'build' && !fingerOnly && view === 'PLAN' && wallTool) {
+    wallGesture = { id: e.pointerId, sx: e.clientX, sy: e.clientY, p };
+    owner = e.pointerId;
+    noteInput(e, 'wall');
+    return;
+  }
   if (mode === 'build' && !fingerOnly && view === 'PLAN' && zoneTool) {
     zoneGesture = { id: e.pointerId, sx: e.clientX, sy: e.clientY, p };
     owner = e.pointerId;
     noteInput(e, 'zone');
+    return;
+  }
+  if (mode === 'build' && !fingerOnly && view !== 'PLAN' && routeTool) {
+    routeGesture = { id: e.pointerId, sx: e.clientX, sy: e.clientY, p };
+    owner = e.pointerId;
+    noteInput(e, 'route');
     return;
   }
   if (mode === 'select' && !fingerOnly) {
@@ -3198,6 +4510,7 @@ $('#canvas').addEventListener('pointerdown', (e) => {
       // a dense spot selects nothing yet unless one of its fittings was already
       // chosen — the chooser on lift names the fitting
       selectedId = res.id;
+      if (res.id) { selectedWall = null; selectedRoute = null; }
       // A tap-select arms a drag but nothing moves until the pointer travels
       // TAP_SLOP_PX: a small wobble selects without nudging the fitting. The
       // grab offset keeps the fitting where the finger took hold of it. A drag
@@ -3210,9 +4523,85 @@ $('#canvas').addEventListener('pointerdown', (e) => {
         cands: res.cands,
       };
     } else {
+      const routeHandle = e.target.closest && e.target.closest('.route-handle');
+      if (routeHandle) {
+        if (controlCovers(routeHandle)) {
+          zoom = { s: 1, tx: 0, ty: 0 };
+          renderAll();
+          noteInput(e, 'fit');
+          return;
+        }
+        const which = routeHandle.getAttribute('data-which');
+        const rid = routeHandle.getAttribute('data-route');
+        const rec = routeById(rid);
+        routeDrag = rec ? {
+          id: e.pointerId, which, routeId: rid,
+          sx: e.clientX, sy: e.clientY,
+          origin: { startMm: rec.startMm, endMm: rec.endMm, heightMm: rec.heightMm, wall: rec.wall, face: rec.face, type: rec.type, notes: rec.notes },
+          live: null,
+        } : null;
+        selectedRoute = rid;
+        selectedId = null;
+        selectedWall = null;
+        owner = e.pointerId;
+        noteInput(e, 'route-handle');
+        return;
+      }
+      const routeHit = e.target.closest && e.target.closest('.route-hit');
+      if (routeHit) {
+        selectedRoute = routeHit.getAttribute('data-route');
+        selectedId = null;
+        selectedWall = null;
+        highlightIds = null;
+        owner = e.pointerId;
+        noteInput(e, 'route');
+        renderAll();
+        return;
+      }
+      const wallHandle = view === 'PLAN' && e.target.closest && e.target.closest('.wall-handle');
+      if (wallHandle) {
+        if (controlCovers(wallHandle)) {
+          zoom = { s: 1, tx: 0, ty: 0 };
+          renderAll();
+          noteInput(e, 'fit');
+          return;
+        }
+        const which = wallHandle.getAttribute('data-which');
+        const wid = wallHandle.getAttribute('data-wall');
+        const rec = wallRecord(wid);
+        wallDrag = rec ? {
+          id: e.pointerId, which, wallId: wid,
+          sx: e.clientX, sy: e.clientY,
+          origin: { id: rec.id, x1: rec.x1, y1: rec.y1, x2: rec.x2, y2: rec.y2 },
+          live: null,
+        } : null;
+        selectedWall = wid;
+        selectedId = null;
+        selectedRoute = null;
+        owner = e.pointerId;
+        noteInput(e, 'wall-handle');
+        return;
+      }
+      const wallHit = view === 'PLAN' && e.target.closest && e.target.closest('.wall-hit');
+      if (wallHit) {
+        selectedWall = wallHit.getAttribute('data-wall');
+        selectedId = null;
+        selectedRoute = null;
+        highlightIds = null;
+        owner = e.pointerId;
+        noteInput(e, 'wall');
+        renderAll();
+        return;
+      }
       const handle = e.target.closest && e.target.closest('.zone-handle');
       const edge = handle && zoneId ? handle.getAttribute('data-edge') : null;
       if (edge) {
+        if (handle && controlCovers(handle)) {
+          zoom = { s: 1, tx: 0, ty: 0 };
+          renderAll();
+          noteInput(e, 'fit');
+          return;
+        }
         const z = F.zoneById(job, zoneId);
         zoneEdgeDrag = z ? {
           id: e.pointerId, edge, zoneId, sx: e.clientX, sy: e.clientY,
@@ -3275,7 +4664,7 @@ function placeAt(p) {
   const dims = roomMm();
   const tpl = copyTpl;
   const type = tpl ? tpl.type : placeType;
-  let wall, fromLeft, height;
+  let wall, fromLeft, height, face;
   if (type === 'downlight') {
     if (view !== 'PLAN') {
       if (endCopy()) { toast('Stopped placing copies. Downlights can only be copied in the plan view.'); renderAll(); return; }
@@ -3287,23 +4676,34 @@ function placeAt(p) {
     height = Math.max(0, Math.min(dims.D, Math.round(p.y)));
   } else if (view !== 'PLAN') {
     // a copy keeps its captured height in every view; the tap gives only the distance from the left
-    wall = view;
-    fromLeft = Math.max(0, Math.min(Math.round(p.x), C.wallLengthMm(job.room, view)));
+    const parsed = Walls.parseFaceView(view);
+    let maxL;
+    if (parsed) {
+      wall = parsed.id;
+      face = parsed.face;
+      const rec = wallRecord(parsed.id);
+      maxL = rec ? Walls.wallLength(rec) : 0;
+    } else {
+      wall = view;
+      maxL = C.wallLengthMm(job.room, view);
+    }
+    fromLeft = Math.max(0, Math.min(Math.round(p.x), maxL));
     height = tpl ? tpl.heightMm : Math.max(0, Math.min(dims.H - Math.round(p.y), dims.H));
   } else {
-    wall = nearestWallFromPlan(p.x, p.y);
-    const wp = wallParamsFromPlan(p.x, p.y, wall);
-    if (!wp) {
+    const hit = nearestFaceFromPlan(p.x, p.y);
+    if (!hit) {
       toast('That’s in the open floor. Tap close to a wall, or open that wall’s view and tap there.');
       return;
     }
-    const maxL = C.wallLengthMm(job.room, wall);
-    fromLeft = Math.max(0, Math.min(wp.fromLeft, maxL)); // clamp taps beyond the wall ends
+    wall = hit.wall;
+    face = hit.face || undefined;
+    const maxL = Walls.isWallId(wall) ? Walls.wallLength(wallRecord(wall)) : C.wallLengthMm(job.room, wall);
+    fromLeft = Math.max(0, Math.min(hit.fromLeft, maxL));
     height = tpl ? tpl.heightMm : (jobPrefs.heights[type] ?? C.TYPES[type].defaultHeightMm ?? 450);
   }
   fromLeft = Math.max(0, fromLeft);
   if (zoneId && wall !== C.CEILING) {
-    const clip = zoneFaceFor(wall);
+    const clip = F.zoneTouchingFaces(job, activeZone()).find(f => f.wall === wall && (face ? f.face === face : !f.interior));
     if (!clip || fromLeft < clip.fromMm || fromLeft > clip.toMm) {
       toast('Place inside the part of the wall that belongs to this zone.');
       return;
@@ -3318,17 +4718,29 @@ function placeAt(p) {
   let id, revealed = null;
   // Placing onto a hidden layer shows that layer, so the new fitting never vanishes.
   commit(() => {
-    id = tpl ? C.placeLike(job, { type, layer: tpl.layer }, wall, fromLeft, height) : C.placeItem(job, type, wall, fromLeft, height);
+    id = tpl
+      ? C.placeLike(job, { type, layer: tpl.layer }, wall, fromLeft, height, face)
+      : C.placeItem(job, type, wall, fromLeft, height, '', face);
     revealed = revealLayerOf(id);
   });
   if (!id) return; // commit failed (e.g. item cap); job untouched
   rememberHeight(type, wall, height);
   selectedId = id;
-  toast(`${id} placed on ${wall === C.CEILING ? 'ceiling' : 'Wall ' + wall}${revealed ? ` · ${revealed} layer now shown` : ''}${clampNote}`);
+  const placedOn = wall === C.CEILING ? 'ceiling' : (face ? `${wall} ${sideWord(face)} side` : 'Wall ' + wall);
+  toast(`${id} placed on ${placedOn}${revealed ? ` · ${revealed} layer now shown` : ''}${clampNote}`);
   renderAll();
 }
 
 $('#canvas').addEventListener('pointermove', (e) => {
+  if (wallTool && wallTool.first && mode === 'build' && view === 'PLAN' && !pointers.has(e.pointerId)) {
+    const hover = svgPoint(e);
+    if (hover) { wallTool.hover = hover; renderCanvas(); }
+  }
+  if (routeTool && routeTool.first && mode === 'build' && view !== 'PLAN' && !pointers.has(e.pointerId)) {
+    const hover = svgPoint(e);
+    const snapped = hover && snapFacePoint(hover);
+    if (snapped) { routeTool.hover = snapped; renderCanvas(); }
+  }
   if (e.pointerType === 'pen') lastPenAt = performance.now(); // includes hover
   if (e.pointerId === lastDown.id && !lastDown.end) lastDown.moves += 1;
   if (!pointers.has(e.pointerId)) return;
@@ -3365,6 +4777,15 @@ $('#canvas').addEventListener('pointermove', (e) => {
         const dims = roomMm();
         newL = Math.max(0, Math.min(dims.W, Math.round(t.x)));
         newH = Math.max(0, Math.min(dims.D, Math.round(t.y)));
+      } else if (Walls.isWallId(item.wall)) {
+        const rec = wallRecord(item.wall);
+        const off = rec ? Walls.offsetFromPlan(rec, item.face, t) : null;
+        if (off !== null) {
+          const maxL = C.maxFromLeft(job, item);
+          let next = Math.round(off);
+          if (next < 0 || next > maxL) { next = Math.max(0, Math.min(maxL, next)); changedToClamp = true; }
+          newL = next;
+        }
       } else {
         // slide along the item's own wall only
         const wp = wallParamsFromPlan(t.x, t.y, item.wall);
@@ -3400,6 +4821,27 @@ $('#canvas').addEventListener('pointermove', (e) => {
     }
     return;
   }
+  if (routeDrag && routeDrag.id === e.pointerId) {
+    const drag = routeDrag;
+    if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < TAP_SLOP_PX) return;
+    const snapped = snapRouteOffset(drag.origin, p);
+    const live = { startMm: drag.origin.startMm, endMm: drag.origin.endMm };
+    if (drag.which === 'start') live.startMm = snapped;
+    else live.endMm = snapped;
+    drag.live = live;
+    renderCanvas();
+    return;
+  }
+  if (wallDrag && wallDrag.id === e.pointerId) {
+    const drag = wallDrag;
+    if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < TAP_SLOP_PX) return;
+    const axis = Walls.wallAxis(drag.origin);
+    const guides = axis === 'H' ? planGuides().x : planGuides().y;
+    const raw = axis === 'H' ? p.x : p.y;
+    drag.live = wallFromHandle(drag.origin, drag.which, F.snapNearest(raw, screenMm(12), guides));
+    renderCanvas();
+    return;
+  }
   if (zoneEdgeDrag && zoneEdgeDrag.id === e.pointerId) {
     const drag = zoneEdgeDrag;
     const moved = Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) >= TAP_SLOP_PX;
@@ -3426,11 +4868,61 @@ function endPointer(e) {
   if (pointers.size < 2) pinch = null;
   if (e.pointerId !== owner) return;
   owner = null;
+  if (wallGesture && wallGesture.id === e.pointerId) {
+    const g = wallGesture;
+    wallGesture = null;
+    panning = null;
+    if (Math.hypot(e.clientX - g.sx, e.clientY - g.sy) < TAP_SLOP_PX) finishWallTap(g.p);
+    return;
+  }
   if (zoneGesture && zoneGesture.id === e.pointerId) {
     const g = zoneGesture;
     zoneGesture = null;
     panning = null;
     if (Math.hypot(e.clientX - g.sx, e.clientY - g.sy) < TAP_SLOP_PX) finishZoneTap(g.p);
+    return;
+  }
+  if (routeGesture && routeGesture.id === e.pointerId) {
+    const g = routeGesture;
+    routeGesture = null;
+    panning = null;
+    if (Math.hypot(e.clientX - g.sx, e.clientY - g.sy) < TAP_SLOP_PX) finishRouteTap(g.p);
+    return;
+  }
+  if (routeDrag && routeDrag.id === e.pointerId) {
+    const drag = routeDrag;
+    routeDrag = null;
+    const moved = Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) >= TAP_SLOP_PX;
+    if (!moved || !drag.live) { renderCanvas(); return; }
+    let startMm = drag.live.startMm;
+    let endMm = drag.live.endMm;
+    if (startMm > endMm) { const swap = startMm; startMm = endMm; endMm = swap; }
+    const same = startMm === drag.origin.startMm && endMm === drag.origin.endMm;
+    if (!same) {
+      const spec = {
+        type: drag.origin.type,
+        wall: drag.origin.wall,
+        face: drag.origin.face,
+        startMm,
+        endMm,
+        heightMm: drag.origin.heightMm,
+        notes: drag.origin.notes,
+      };
+      const blocked = clipRefusal(spec);
+      if (blocked) { toast(blocked); renderAll(); return; }
+      commit(() => { C.replaceRoute(job, drag.routeId, spec); }, { exact: true });
+    } else renderAll();
+    return;
+  }
+  if (wallDrag && wallDrag.id === e.pointerId) {
+    const drag = wallDrag;
+    wallDrag = null;
+    const moved = Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) >= TAP_SLOP_PX;
+    if (!moved || !drag.live) { renderCanvas(); return; }
+    const same = drag.live.x1 === drag.origin.x1 && drag.live.y1 === drag.origin.y1
+      && drag.live.x2 === drag.origin.x2 && drag.live.y2 === drag.origin.y2;
+    if (!same) applyWallSpec(drag.wallId, drag.live);
+    else renderAll();
     return;
   }
   if (zoneEdgeDrag && zoneEdgeDrag.id === e.pointerId) {
@@ -3441,7 +4933,7 @@ function endPointer(e) {
     const { W, D } = roomMm();
     const vertical = drag.edge === 'n' || drag.edge === 's';
     const rawValue = drag.edge === 'n' ? drag.live.y0 : drag.edge === 's' ? drag.live.y1 : drag.edge === 'w' ? drag.live.x0 : drag.live.x1;
-    const snapped = F.snapToGuides(rawValue, screenMm(12), vertical ? [0, D] : [0, W]);
+    const snapped = F.snapNearest(rawValue, screenMm(12), vertical ? planGuides().y : planGuides().x);
     const next = boundsForEdge(drag.origin, drag.edge, snapped);
     if (next.x0 === drag.origin.x0 && next.y0 === drag.origin.y0 && next.x1 === drag.origin.x1 && next.y1 === drag.origin.y1) {
       renderCanvas();
@@ -3486,6 +4978,17 @@ function endPointer(e) {
       return;
     }
     if (dragFitting.moved) {
+      const dragged = job.items.find(i => i.id === dragFitting.id);
+      if (dragged && zoneId && dragged.wall !== C.CEILING) {
+        const clip = F.zoneTouchingFaces(job, activeZone()).find(f => f.wall === dragged.wall && (dragged.face ? f.face === dragged.face : !f.interior));
+        if (!clip || dragged.fromLeftMm < clip.fromMm || dragged.fromLeftMm > clip.toMm) {
+          job = JSON.parse(dragFitting.pre);
+          dragFitting = null;
+          toast('Place inside the part of the wall that belongs to this zone.');
+          renderAll();
+          return;
+        }
+      }
       // one history entry for the whole drag (snapshot taken before it started)
       history.push(dragFitting.pre);
       if (history.length > C.LIMITS.historyLimit) history.shift();
@@ -3510,9 +5013,14 @@ function endPointer(e) {
       if (pan.pendingZone) {
         if (selectedId && !selectionVisible(selectedId, pan.pendingZone)) selectedId = null;
         zoneId = pan.pendingZone;
+        selectedWall = null;
+        highlightIds = null;
+        if (selectedRoute && !routeInScope(routeById(selectedRoute))) selectedRoute = null;
         if (PHONE.matches) inspectorCollapsed = true;
       } else if (pan.pendingClear) {
         selectedId = null;
+        selectedRoute = null;
+        if (view === 'PLAN') { selectedWall = null; highlightIds = null; }
       }
       renderAll();
       return;
@@ -3560,15 +5068,88 @@ $('#canvas').addEventListener('wheel', (e) => {
 const MODES = ['select', 'place', 'draw', 'notes', 'build'];
 function screenMm(px) {
   const svg = $('#canvas');
+  const matrix = $('#world')?.getScreenCTM();
+  const scale = matrix && Math.hypot(matrix.a, matrix.b);
+  if (scale > 0) return px / scale;
   const rect = svg.getBoundingClientRect();
   const vb = svg.viewBox && svg.viewBox.baseVal;
-  if (!rect.width || !vb || !vb.width || !zoom.s) return 50;
-  return px * (vb.width / rect.width) / zoom.s;
+  if (!rect.width || !rect.height || !vb?.width || !vb.height || !zoom.s) return 50;
+  return px / (Math.min(rect.width / vb.width, rect.height / vb.height) * zoom.s);
+}
+function planGuides() {
+  const { W, D } = roomMm();
+  const x = [0, W];
+  const y = [0, D];
+  for (const wall of interiorWalls()) {
+    x.push(wall.x1, wall.x2);
+    y.push(wall.y1, wall.y2);
+  }
+  return { x, y };
 }
 function snapPlan(p) {
-  const { W, D } = roomMm();
   const tol = screenMm(12);
-  return { x: F.snapToGuides(p.x, tol, [0, W]), y: F.snapToGuides(p.y, tol, [0, D]) };
+  const guides = planGuides();
+  return { x: F.snapNearest(p.x, tol, guides.x), y: F.snapNearest(p.y, tol, guides.y) };
+}
+function lockedWall(a, b) {
+  const dx = Math.abs(b.x - a.x);
+  const dy = Math.abs(b.y - a.y);
+  if (dx >= dy) return orderedWall({ x1: a.x, y1: a.y, x2: b.x, y2: a.y });
+  return orderedWall({ x1: a.x, y1: a.y, x2: a.x, y2: b.y });
+}
+function wallFromHandle(origin, which, value) {
+  const next = { x1: origin.x1, y1: origin.y1, x2: origin.x2, y2: origin.y2 };
+  const horizontal = origin.y1 === origin.y2;
+  const snapped = Math.round(value);
+  if (horizontal) {
+    if (which === 'start') next.x1 = snapped;
+    else next.x2 = snapped;
+  } else if (which === 'start') next.y1 = snapped;
+  else next.y2 = snapped;
+  return orderedWall(next);
+}
+function wallPreviewHint() {
+  if (!wallTool || !wallTool.first || !wallTool.hover || !job || !job.floor) return '';
+  const aim = lockedWall(wallTool.first, snapPlan(wallTool.hover));
+  const length = Math.abs(aim.x2 - aim.x1) + Math.abs(aim.y2 - aim.y1);
+  return `W${job.floor.nextWallNo} · ${(length / 1000).toFixed(2)} m`;
+}
+function finishWallTap(p) {
+  if (!wallTool || view !== 'PLAN' || !job.floor) return;
+  const snapped = snapPlan(p);
+  if (!wallTool.first) {
+    wallTool = { first: snapped, hover: null };
+    if (PHONE.matches) inspectorCollapsed = true;
+    renderAll();
+    return;
+  }
+  const spec = lockedWall(wallTool.first, snapped);
+  let id = null;
+  commit(() => { id = C.addWall(job, spec); }, { exact: true });
+  wallTool = { first: null, hover: null };
+  if (id && wallRecord(id)) {
+    selectedWall = id;
+    selectedId = null;
+    selectedRoute = null;
+    const made = wallRecord(id);
+    toast(`Added ${id}, ${wallLengthText(made)} long. Undo removes it.`);
+    focusWall();
+  } else renderCanvas();
+}
+function reachesOutside(wall, widthMm, depthMm) {
+  if (!wall) return false;
+  if (wall.y1 === wall.y2 && (wall.y1 === 0 || wall.y1 === depthMm)) return true;
+  if (wall.x1 === wall.x2 && (wall.x1 === 0 || wall.x1 === widthMm)) return true;
+  return wall.x1 === 0 || wall.x2 === widthMm || wall.y1 === 0 || wall.y2 === depthMm;
+}
+function controlCovers(node) {
+  if (!node || !node.getBoundingClientRect) return false;
+  const r = node.getBoundingClientRect();
+  const cx = r.left + r.width / 2;
+  const cy = r.top + r.height / 2;
+  const hit = document.elementFromPoint(cx, cy);
+  if (!hit) return false;
+  return hit !== node && !node.contains(hit);
 }
 function finishZoneTap(p) {
   if (!zoneTool || view !== 'PLAN' || !job.floor) return;
@@ -3581,8 +5162,7 @@ function finishZoneTap(p) {
     id = C.addZone(job, {
       name, x0: Math.min(a.x, snapped.x), y0: Math.min(a.y, snapped.y), x1: Math.max(a.x, snapped.x), y1: Math.max(a.y, snapped.y),
     });
-    zoneId = id;
-    if (selectedId && !selectionVisible(selectedId, id)) selectedId = null;
+    if (id) selectNewZone(id);
   }, { exact: true });
   zoneTool = { first: null };
   if (id && F.zoneById(job, id)) {
@@ -3598,13 +5178,172 @@ function boundsForEdge(origin, edge, value) {
   else if (edge === 'e') next.x1 = Math.round(value);
   return next;
 }
+function faceGuides(length, clip) {
+  const guides = [0, length];
+  if (clip) guides.push(clip.fromMm, clip.toMm);
+  return guides;
+}
+function snapFaceOffset(mm, length, clip) {
+  return Math.round(F.snapNearest(mm, screenMm(12), faceGuides(length, clip)));
+}
+function snapFaceHeight(mm, ceiling) {
+  return Math.round(F.snapNearest(mm, screenMm(12), [0, ceiling]));
+}
+function snapFacePoint(p) {
+  const ctx = faceContext();
+  if (!ctx || !p) return null;
+  const dims = roomMm();
+  return {
+    offset: snapFaceOffset(p.x, ctx.length, ctx.clip),
+    height: snapFaceHeight(dims.H - p.y, dims.H),
+  };
+}
+function snapRouteOffset(origin, p) {
+  const wall = Routes.wallGeometry(job, origin.wall);
+  if (!wall) return origin.startMm;
+  let raw = p.x;
+  if (view === 'PLAN') {
+    const off = Walls.offsetFromPlan(wall, origin.face, p);
+    if (off === null) return origin.startMm;
+    raw = off;
+  }
+  const clip = scopeClipFor(origin);
+  return snapFaceOffset(raw, Walls.wallLength(wall), clip);
+}
+function routePreviewHint() {
+  if (!routeTool || !routeTool.first || view === 'PLAN' || !job || !job.floor) return '';
+  const n = job.floor.nextRouteNo;
+  const prefix = routeTool.type === 'conduit' ? 'C' : 'T';
+  const height = routeTool.first.height;
+  if (!routeTool.hover) return `${prefix}${n} · ${height} mm high`;
+  const from = Math.min(routeTool.first.offset, routeTool.hover.offset);
+  const to = Math.max(routeTool.first.offset, routeTool.hover.offset);
+  return `${prefix}${n} · ${from} to ${to} mm · ${height} mm high`;
+}
+function focusRoute() {
+  inspectorCollapsed = !!PHONE.matches;
+  renderAll();
+}
+function acceptRoutePoint(snapped, ctx) {
+  if (!ctx || !snapped) return 'Open a wall face before adding a run.';
+  if (snapped.height < 0 || snapped.height > C.ceilingHeightMm(job.room)) {
+    return `Height must be 0 to ${C.ceilingHeightMm(job.room)} mm.`;
+  }
+  if (snapped.offset < 0 || snapped.offset > ctx.length) {
+    return `Keep the run on this wall, which is ${(ctx.length / 1000).toFixed(2)} m long.`;
+  }
+  if (ctx.clip && (snapped.offset < ctx.clip.fromMm || snapped.offset > ctx.clip.toMm)) {
+    return 'Keep both ends inside the part of the wall that belongs to this zone.';
+  }
+  return null;
+}
+function finishRouteTap(p) {
+  if (!routeTool || view === 'PLAN' || !job || !job.floor) return;
+  const ctx = faceContext();
+  const snapped = snapFacePoint(p);
+  const problem = acceptRoutePoint(snapped, ctx);
+  if (problem) { toast(problem); return; }
+  if (!routeTool.first) {
+    routeTool = { type: routeTool.type, first: snapped, hover: null };
+    if (PHONE.matches) inspectorCollapsed = true;
+    renderAll();
+    return;
+  }
+  const start = Math.min(routeTool.first.offset, snapped.offset);
+  const end = Math.max(routeTool.first.offset, snapped.offset);
+  const spec = {
+    type: routeTool.type,
+    wall: ctx.wallId,
+    face: ctx.face,
+    startMm: start,
+    endMm: end,
+    heightMm: routeTool.first.height,
+    notes: '',
+  };
+  const blocked = clipRefusal(spec) || (end - start < 50 ? 'A run must be at least 50 mm long.' : null);
+  if (blocked) { toast(blocked); renderCanvas(); return; }
+  let id = null;
+  const ok = commit(() => { id = C.addRoute(job, spec); }, { exact: true });
+  if (!ok || !id || !routeById(id)) return;
+  routeTool = { type: routeTool.type, first: null, hover: null };
+  selectedRoute = id;
+  selectedId = null;
+  selectedWall = null;
+  highlightIds = null;
+  toast(`Added ${Routes.routeLabel(routeById(id))}. Undo removes it.`);
+  focusRoute();
+}
+function openRouteSizeForm() {
+  const ctx = faceContext();
+  if (!ctx) { toast('Open a wall face before entering a run.'); return; }
+  const box = el('div');
+  const type = el('select', { 'data-testid': 'route-type' });
+  type.append(el('option', { value: 'trunking' }, 'Trunking'), el('option', { value: 'conduit' }, 'Conduit'));
+  type.value = routeTool && routeTool.type === 'conduit' ? 'conduit' : 'trunking';
+  const fields = {
+    start: zoneField('Start', 'route-start', '', true),
+    end: zoneField('End', 'route-end', '', true),
+    height: zoneField('Height', 'route-height', '', true),
+    notes: el('textarea', { 'data-testid': 'route-notes', maxlength: '200' }),
+  };
+  box.append(
+    el('label', {}, 'Type'), type,
+    el('label', {}, 'Start (mm)'), fields.start,
+    el('label', {}, 'End (mm)'), fields.end,
+    el('label', {}, 'Height (mm)'), fields.height,
+    el('label', {}, 'Notes'), fields.notes,
+  );
+  const add = () => {
+    const start = readWholeMm(fields.start);
+    const end = readWholeMm(fields.end);
+    const height = readWholeMm(fields.height);
+    if (start === null || end === null || height === null) { toast('Enter whole millimetres.'); return false; }
+    const spec = {
+      type: type.value,
+      wall: ctx.wallId,
+      face: ctx.face,
+      startMm: start,
+      endMm: end,
+      heightMm: height,
+      notes: fields.notes.value.slice(0, 200),
+    };
+    const blocked = clipRefusal(spec);
+    if (blocked) { toast(blocked); return false; }
+    let id = null;
+    commit(() => { id = C.addRoute(job, spec); }, { exact: true });
+    if (!id || !routeById(id)) return false;
+    selectedRoute = id;
+    selectedId = null;
+    selectedWall = null;
+    highlightIds = null;
+    routeTool = { type: spec.type, first: null, hover: null };
+    toast(`Added ${Routes.routeLabel(routeById(id))}. Undo removes it.`);
+    focusRoute();
+    return true;
+  };
+  for (const input of [fields.start, fields.end, fields.height]) {
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      if (add()) closeModal();
+    });
+  }
+  modal('Run size', [box], [
+    { label: 'Cancel', fn: closeModal },
+    { label: 'Add', class: 'btn-primary', testid: 'route-add', fn: () => { if (add()) closeModal(); } },
+  ]);
+}
 function setMode(m) {
   if (!MODES.includes(m)) return;
   const leftMulti = m !== 'select' && !!multiIds;
   if (leftMulti) endMulti(); // another tool leaves multi mode with no change
   if (m !== 'place') endCopy(); // so does copy mode
-  if (m !== mode) zoneTool = m === 'build' ? zoneTool : null;
-  if (m !== 'build') zoneTool = null;
+  if (m !== mode) {
+    zoneTool = m === 'build' ? zoneTool : null;
+    wallTool = m === 'build' ? wallTool : null;
+    routeTool = m === 'build' ? routeTool : null;
+  }
+  if (m !== 'build') { zoneTool = null; wallTool = null; routeTool = null; }
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   $('#place-palette').hidden = m !== 'place' && m !== 'build';
@@ -3617,20 +5356,57 @@ document.querySelectorAll('.mode-btn[data-mode]').forEach(b => b.addEventListene
 function buildPalette() {
   const pal = $('#place-palette');
   pal.innerHTML = '';
-  if (mode === 'build') {
-    pal.appendChild(el('p', { class: 'palette-title' }, 'Zones'));
-    const add = el('button', { class: 'pal-btn' + (zoneTool ? ' active' : ''), 'data-testid': 'build-add-zone' }, 'Add zone');
-    add.addEventListener('click', () => {
-      view = 'PLAN';
-      zoneTool = { first: null };
+  paletteView = view;
+  if (mode === 'build' && view !== 'PLAN') {
+    pal.appendChild(el('p', { class: 'palette-title' }, 'Build'));
+    const addTrunk = el('button', { class: 'pal-btn' + (routeTool && routeTool.type === 'trunking' ? ' active' : ''), 'data-testid': 'build-add-trunking' }, 'Add trunking');
+    addTrunk.addEventListener('click', () => {
+      routeTool = { type: 'trunking', first: null, hover: null };
+      wallTool = null;
+      zoneTool = null;
+      buildPalette();
+      renderCanvas();
+    });
+    const addConduit = el('button', { class: 'pal-btn' + (routeTool && routeTool.type === 'conduit' ? ' active' : ''), 'data-testid': 'build-add-conduit' }, 'Add conduit');
+    addConduit.addEventListener('click', () => {
+      routeTool = { type: 'conduit', first: null, hover: null };
+      wallTool = null;
+      zoneTool = null;
       buildPalette();
       renderCanvas();
     });
     const sizes = el('button', { class: 'pal-btn', 'data-testid': 'build-enter-sizes' }, 'Enter sizes…');
-    sizes.addEventListener('click', openZoneSizeForm);
-    const cancel = el('button', { class: 'pal-btn' }, 'Cancel');
-    cancel.addEventListener('click', () => { zoneTool = null; buildPalette(); renderCanvas(); });
-    pal.append(add, sizes, cancel);
+    sizes.addEventListener('click', () => openRouteSizeForm());
+    const cancel = el('button', { class: 'pal-btn', 'data-testid': 'build-cancel' }, 'Cancel');
+    cancel.addEventListener('click', () => { routeTool = null; buildPalette(); renderCanvas(); });
+    pal.append(addTrunk, addConduit, sizes, cancel);
+    return;
+  }
+  if (mode === 'build') {
+    pal.appendChild(el('p', { class: 'palette-title' }, 'Build'));
+    const addWall = el('button', { class: 'pal-btn' + (wallTool ? ' active' : ''), 'data-testid': 'build-add-wall' }, 'Add wall');
+    addWall.addEventListener('click', () => {
+      view = 'PLAN';
+      wallTool = { first: null, hover: null };
+      zoneTool = null;
+      routeTool = null;
+      buildPalette();
+      renderCanvas();
+    });
+    const add = el('button', { class: 'pal-btn' + (zoneTool ? ' active' : ''), 'data-testid': 'build-add-zone' }, 'Add zone');
+    add.addEventListener('click', () => {
+      view = 'PLAN';
+      zoneTool = { first: null };
+      wallTool = null;
+      routeTool = null;
+      buildPalette();
+      renderCanvas();
+    });
+    const sizes = el('button', { class: 'pal-btn', 'data-testid': 'build-enter-sizes' }, 'Enter sizes…');
+    sizes.addEventListener('click', () => { if (wallTool) openWallSizeForm(); else openZoneSizeForm(); });
+    const cancel = el('button', { class: 'pal-btn', 'data-testid': 'build-cancel' }, 'Cancel');
+    cancel.addEventListener('click', () => { zoneTool = null; wallTool = null; routeTool = null; buildPalette(); renderCanvas(); });
+    pal.append(addWall, add, sizes, cancel);
     return;
   }
   if (copyTpl) {
@@ -3746,7 +5522,12 @@ document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
   else if ((e.ctrlKey && e.key.toLowerCase() === 'y') || (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'z')) { e.preventDefault(); redo(); }
   else if (e.key === 'Delete' && selectedId) { commit(() => { job.items = job.items.filter(i => i.id !== selectedId); }); toast(`${selectedId} deleted · Undo`); selectedId = null; renderAll(); }
-  else if (e.key === 'Escape' && zoneTool && zoneTool.first) { zoneTool = { first: null }; renderCanvas(); }
+  else if (e.key === 'Escape' && ((zoneTool && zoneTool.first) || (wallTool && wallTool.first) || (routeTool && routeTool.first))) {
+    if (zoneTool) zoneTool = { first: null };
+    if (wallTool) wallTool = { first: null, hover: null };
+    dropRoutePoint();
+    renderCanvas();
+  }
   else if (e.key === 'Escape' && copyTpl) cancelCopy(); // leaves copy mode with nothing added
   else if (e.key === 'Escape') {
     if (PHONE.matches) inspectorCollapsed = true;

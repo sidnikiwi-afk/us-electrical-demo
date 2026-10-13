@@ -2,9 +2,32 @@
 // No DOM, no storage, no network. All money is integer pence.
 // Example rates only — nothing here is a real quotation or installation advice.
 
+import {
+  MSG,
+  isWallId,
+  parseFaceView,
+  wallAxis,
+  wallLength,
+  planFromOffset,
+  carriedOffset,
+  wallsError,
+  placementError,
+  interiorFittingError,
+  interiorMarkError,
+  attachmentProblem,
+} from './floor-walls.js';
+import {
+  carriedRun,
+  copyRoute,
+  faceAllowed,
+  routesError,
+  runOffWall,
+  wallGeometry,
+} from './floor-routes.js';
+
 export const SCHEMA = 'surface-job';
 export const SCHEMA_VERSION = 1;
-export const BUILD = 'surface-proto-v13-floor-zones-20261012';
+export const BUILD = 'surface-proto-v17-floor-final-20261013';
 
 export const LIMITS = {
   maxWallM: 20,        // room width / depth
@@ -135,6 +158,252 @@ export function replaceZone(job, id, spec) {
   return id;
 }
 
+function wallOn(job, id) {
+  const walls = job && job.floor && Array.isArray(job.floor.walls) ? job.floor.walls : null;
+  if (!walls) return null;
+  return walls.find(wall => wall.id === id) || null;
+}
+
+// Adds one interior wall. A refusal throws and leaves the job untouched.
+export function addWall(job, spec) {
+  const trial = cloneData(job);
+  const floor = trial && trial.floor;
+  const n = floor && floor.nextWallNo;
+  const wall = {
+    id: 'W' + n,
+    x1: spec && spec.x1,
+    y1: spec && spec.y1,
+    x2: spec && spec.x2,
+    y2: spec && spec.y2,
+  };
+  if (floor && Array.isArray(floor.walls) && Number.isInteger(n)) {
+    floor.walls.push(wall);
+    floor.nextWallNo = n + 1;
+  }
+  const v = validateJobV2(trial);
+  if (!v.ok) throw new Error(v.errors[0]);
+  job.floor.walls.push({ id: wall.id, x1: wall.x1, y1: wall.y1, x2: wall.x2, y2: wall.y2 });
+  job.floor.nextWallNo = n + 1;
+  return wall.id;
+}
+
+// Moves a wall. Endpoint edits keep plan positions; a new line carries offsets.
+// A refusal throws and leaves the job untouched.
+export function replaceWall(job, id, spec) {
+  const trial = cloneData(job);
+  if (!trial || !trial.floor || !Array.isArray(trial.floor.walls)) throw new Error('This job has no floor.');
+  const wall = trial.floor.walls.find(item => item.id === id);
+  if (!wall) throw new Error(MSG.missingWall);
+  const before = { id: wall.id, x1: wall.x1, y1: wall.y1, x2: wall.x2, y2: wall.y2 };
+  wall.x1 = spec && spec.x1;
+  wall.y1 = spec && spec.y1;
+  wall.x2 = spec && spec.x2;
+  wall.y2 = spec && spec.y2;
+  const stranded = remapWallAttachments(trial, id, before, wall);
+  if (stranded) throw new Error(stranded);
+  const v = validateJobV2(trial);
+  if (!v.ok) throw new Error(v.errors[0]);
+  const live = job.floor.walls.find(item => item.id === id);
+  live.x1 = wall.x1;
+  live.y1 = wall.y1;
+  live.x2 = wall.x2;
+  live.y2 = wall.y2;
+  copyWallAttachments(job, trial, id);
+  return id;
+}
+
+function remapWallAttachments(trial, id, before, wall) {
+  if (!wallAxis(wall)) return null;
+  for (const it of trial.items || []) {
+    if (!it || it.wall !== id) continue;
+    it.fromLeftMm = carriedOffset(before, wall, it.face, it.fromLeftMm);
+    const problem = attachmentProblem(wall, it.face, it.fromLeftMm, 'fitting');
+    if (problem) return problem;
+  }
+  for (const pin of trial.notePins || []) {
+    const parsed = pin && parseFaceView(pin.view);
+    if (!parsed || parsed.id !== id) continue;
+    pin.x = carriedOffset(before, wall, parsed.face, pin.x);
+    const problem = attachmentProblem(wall, parsed.face, pin.x, 'note');
+    if (problem) return problem;
+  }
+  for (const key of Object.keys(trial.annotations || {})) {
+    const parsed = parseFaceView(key);
+    if (!parsed || parsed.id !== id) continue;
+    const strokes = trial.annotations[key];
+    if (!Array.isArray(strokes)) continue;
+    for (const stroke of strokes) {
+      if (!stroke || !Array.isArray(stroke.points)) continue;
+      for (const point of stroke.points) {
+        if (!Array.isArray(point) || typeof point[0] !== 'number') continue;
+        point[0] = carriedOffset(before, wall, parsed.face, point[0]);
+        const problem = attachmentProblem(wall, parsed.face, point[0], 'sketch');
+        if (problem) return problem;
+      }
+    }
+  }
+  for (const route of (trial.floor && trial.floor.routes) || []) {
+    if (!route || route.wall !== id) continue;
+    const moved = carriedRun(before, wall, route);
+    route.startMm = moved.startMm;
+    route.endMm = moved.endMm;
+    const problem = runOffWall(wall, route.face, route.startMm, route.endMm);
+    if (problem) return problem;
+  }
+  return null;
+}
+
+function copyWallAttachments(job, trial, id) {
+  for (const it of trial.items || []) {
+    if (!it || it.wall !== id) continue;
+    const live = job.items.find(item => item.id === it.id);
+    if (live) live.fromLeftMm = it.fromLeftMm;
+  }
+  const pins = trial.notePins || [];
+  for (let i = 0; i < pins.length; i += 1) {
+    const parsed = parseFaceView(pins[i] && pins[i].view);
+    if (!parsed || parsed.id !== id) continue;
+    if (job.notePins && job.notePins[i]) job.notePins[i].x = pins[i].x;
+  }
+  for (const key of Object.keys(trial.annotations || {})) {
+    const parsed = parseFaceView(key);
+    if (!parsed || parsed.id !== id) continue;
+    if (!job.annotations) job.annotations = {};
+    job.annotations[key] = JSON.parse(JSON.stringify(trial.annotations[key]));
+  }
+  for (const route of (trial.floor && trial.floor.routes) || []) {
+    if (!route || route.wall !== id) continue;
+    const live = ((job.floor && job.floor.routes) || []).find(item => item && item.id === route.id);
+    if (!live) continue;
+    live.startMm = route.startMm;
+    live.endMm = route.endMm;
+  }
+}
+
+function wallHasAttachment(job, id) {
+  if ((job.items || []).some(it => it && it.wall === id)) return true;
+  if ((job.notePins || []).some(pin => {
+    const parsed = pin && parseFaceView(pin.view);
+    return parsed && parsed.id === id;
+  })) return true;
+  for (const key of Object.keys(job.annotations || {})) {
+    const parsed = parseFaceView(key);
+    if (!parsed || parsed.id !== id) continue;
+    const strokes = job.annotations[key];
+    if (Array.isArray(strokes) && strokes.length > 0) return true;
+  }
+  return false;
+}
+
+function cleanEmptyFaceKeys(job, id) {
+  const ann = job && job.annotations;
+  if (!ann) return;
+  for (const key of Object.keys(ann)) {
+    const parsed = parseFaceView(key);
+    if (!parsed || parsed.id !== id) continue;
+    if (Array.isArray(ann[key]) && ann[key].length === 0) delete ann[key];
+  }
+}
+
+// Removes one interior wall. The wall counter stays, so the ID is not reused.
+// A wall with fittings, notes or sketches is refused and left untouched.
+export function removeWall(job, id) {
+  const trial = cloneData(job);
+  if (!trial || !trial.floor || !Array.isArray(trial.floor.walls)) throw new Error('This job has no floor.');
+  if (!trial.floor.walls.some(wall => wall.id === id)) throw new Error(MSG.missingWall);
+  if (wallHasAttachment(trial, id)) throw new Error(MSG.removeBlocked);
+  if ((trial.floor.routes || []).some(route => route && route.wall === id)) {
+    throw new Error('Remove the runs on this wall first.');
+  }
+  trial.floor.walls = trial.floor.walls.filter(wall => wall.id !== id);
+  cleanEmptyFaceKeys(trial, id);
+  const v = validateJobV2(trial);
+  if (!v.ok) throw new Error(v.errors[0]);
+  job.floor.walls = job.floor.walls.filter(wall => wall.id !== id);
+  cleanEmptyFaceKeys(job, id);
+}
+
+export function faceOffsetToPlan(job, wallId, face, offsetMm) {
+  const wall = wallGeometry(job, wallId);
+  if (!wall) throw new Error(MSG.missingWall);
+  // Exterior walls only have an inner face. The outer face is refused here,
+  // the same rule routes use, so a north offset on wall A cannot become a point.
+  if (!faceAllowed(wall, face)) throw new Error(MSG.badFace);
+  const plan = planFromOffset(wall, face, offsetMm);
+  if (!plan) throw new Error(MSG.badFace);
+  return { x: plan.x, y: plan.y };
+}
+
+function routeFromSpec(id, spec, notesFallback) {
+  const notes = spec && Object.prototype.hasOwnProperty.call(spec, 'notes') ? spec.notes : notesFallback;
+  return {
+    id,
+    type: spec && spec.type,
+    wall: spec && spec.wall,
+    face: spec && spec.face,
+    startMm: spec && spec.startMm,
+    endMm: spec && spec.endMm,
+    heightMm: spec && spec.heightMm,
+    notes: notes === undefined ? '' : notes,
+  };
+}
+
+// Adds one straight run on a wall face. A refusal throws and leaves the job untouched.
+export function addRoute(job, spec) {
+  const trial = cloneData(job);
+  const floor = trial && trial.floor;
+  const n = floor && floor.nextRouteNo;
+  const route = routeFromSpec('R' + n, spec, '');
+  if (floor && Array.isArray(floor.routes) && Number.isInteger(n)) {
+    floor.routes.push(route);
+    floor.nextRouteNo = n + 1;
+  }
+  const v = validateJobV2(trial);
+  if (!v.ok) throw new Error(v.errors[0]);
+  job.floor.routes.push(copyRoute(route));
+  job.floor.nextRouteNo = n + 1;
+  return route.id;
+}
+
+// Replaces one run. The id stays put. A refusal throws and leaves the job untouched.
+export function replaceRoute(job, id, spec) {
+  const trial = cloneData(job);
+  if (!trial || !trial.floor || !Array.isArray(trial.floor.routes)) throw new Error('This job has no floor.');
+  const route = trial.floor.routes.find(item => item && item.id === id);
+  if (!route) throw new Error('That run is not on this floor.');
+  const next = routeFromSpec(id, spec, route.notes);
+  route.type = next.type;
+  route.wall = next.wall;
+  route.face = next.face;
+  route.startMm = next.startMm;
+  route.endMm = next.endMm;
+  route.heightMm = next.heightMm;
+  route.notes = next.notes;
+  const v = validateJobV2(trial);
+  if (!v.ok) throw new Error(v.errors[0]);
+  const live = job.floor.routes.find(item => item && item.id === id);
+  live.type = route.type;
+  live.wall = route.wall;
+  live.face = route.face;
+  live.startMm = route.startMm;
+  live.endMm = route.endMm;
+  live.heightMm = route.heightMm;
+  live.notes = route.notes;
+  return id;
+}
+
+// Removes one run. The route counter stays, so the id is not reused.
+export function removeRoute(job, id) {
+  const trial = cloneData(job);
+  if (!trial || !trial.floor || !Array.isArray(trial.floor.routes)) throw new Error('This job has no floor.');
+  const next = trial.floor.routes.filter(item => item && item.id !== id);
+  if (next.length === trial.floor.routes.length) throw new Error('That run is not on this floor.');
+  trial.floor.routes = next;
+  const v = validateJobV2(trial);
+  if (!v.ok) throw new Error(v.errors[0]);
+  job.floor.routes = job.floor.routes.filter(item => item && item.id !== id);
+}
+
 // Removes one zone. The zone counter stays where it is, so the ID is not reused.
 export function removeZone(job, id) {
   const trial = cloneData(job);
@@ -165,12 +434,29 @@ export function makeId(job) {
   return 'F' + job.nextId;
 }
 
-export function placeItem(job, type, wall, fromLeftMm, heightMm, notes = '') {
+export function placeItem(job, type, wall, fromLeftMm, heightMm, notes = '', face) {
   if (!TYPES[type]) throw new Error(`unknown fitting type "${type}"`);
-  if (!(WALLS.includes(wall) || wall === CEILING)) throw new Error(`unknown wall "${wall}"`);
+  const legacy = WALLS.includes(wall) || wall === CEILING;
+  const interior = isWallId(wall);
+  if (!legacy && !interior) throw new Error(`unknown wall "${wall}"`);
   if (job.items.length >= LIMITS.maxItems) throw new Error('too many fittings');
+  if (interior) {
+    const err = placementError(wallOn(job, wall), fromLeftMm, heightMm, face, ceilingHeightMm(job.room));
+    if (err) throw new Error(err);
+  } else if (face !== undefined) {
+    throw new Error(MSG.badFace);
+  }
   const id = makeId(job);
-  job.items.push({ id, type, wall, fromLeftMm: Math.round(fromLeftMm), heightMm: Math.round(heightMm), notes: String(notes).slice(0, LIMITS.maxTextLen) });
+  const item = {
+    id,
+    type,
+    wall,
+    fromLeftMm: Math.round(fromLeftMm),
+    heightMm: Math.round(heightMm),
+    notes: String(notes).slice(0, LIMITS.maxTextLen),
+  };
+  if (interior) item.face = face;
+  job.items.push(item);
   job.nextId += 1;
   return id;
 }
@@ -178,10 +464,10 @@ export function placeItem(job, type, wall, fromLeftMm, heightMm, notes = '') {
 // "Place like this": a new fitting with the template's type and layer and a
 // blank note. The layer is stored only when it differs from the type default.
 // Checks the layer before placing, so every throw leaves the job untouched.
-export function placeLike(job, template, wall, fromLeftMm, heightMm) {
+export function placeLike(job, template, wall, fromLeftMm, heightMm, face) {
   const layer = template?.layer ?? null;
   if (layer !== null && !isLayer(layer)) throw new Error(`unknown layer "${String(layer).slice(0, 40)}"`);
-  const id = placeItem(job, template?.type, wall, fromLeftMm, heightMm, '');
+  const id = placeItem(job, template?.type, wall, fromLeftMm, heightMm, '', face);
   if (layer !== null && layer !== defaultLayerFor(template.type)) job.items[job.items.length - 1].layer = layer;
   return id;
 }
@@ -211,6 +497,10 @@ export function ceilingHeightMm(room) {
 
 export function maxFromLeft(job, item) {
   if (item.wall === CEILING) return wallLengthMm(job.room, 'A'); // ceiling x across width
+  if (isWallId(item.wall)) {
+    const wall = wallOn(job, item.wall);
+    return wall ? wallLength(wall) : 0;
+  }
   return wallLengthMm(job.room, item.wall);
 }
 
@@ -240,6 +530,8 @@ export function clampItem(job, item) {
 export function itemsOutside(job, widthM, depthM, heightM) {
   const trial = { ...job, room: { widthM, depthM, heightM } };
   return job.items.filter(it => {
+    // Interior offsets belong to the wall, not the room rectangle.
+    if (isWallId(it.wall)) return false;
     const maxL = maxFromLeft(trial, it);
     const maxH = maxHeight(trial, it);
     return it.fromLeftMm > maxL || it.heightMm > maxH;
@@ -251,6 +543,7 @@ export function moveOutsideItemsToEdge(job, widthM, depthM, heightM) {
   // caller may not have applied it yet). Non-finite values become 0.
   const trial = { ...job, room: { widthM, depthM, heightM } };
   job.items.forEach(it => {
+    if (isWallId(it.wall)) return;
     const maxL = maxFromLeft(trial, it);
     const maxH = maxHeight(trial, it);
     const l = Number.isFinite(it.fromLeftMm) ? it.fromLeftMm : 0;
@@ -297,6 +590,7 @@ export function setItemType(job, id, type) {
   delete it.layer;
   if (type === 'downlight') it.wall = CEILING;
   else if (it.wall === CEILING) it.wall = 'A';
+  if (!isWallId(it.wall)) delete it.face;
   clampItem(job, it);
   return it;
 }
@@ -428,7 +722,7 @@ export function validateRoom(room, errs, prefix = 'room') {
   }
 }
 
-export function validateJob(job) {
+export function validateJob(job, opts) {
   // Returns {ok:true, job} or {ok:false, errors:[string]}. Atomic: never mutates input.
   const errs = [];
   if (!job || typeof job !== 'object') return { ok: false, errors: ['not an object'] };
@@ -449,7 +743,8 @@ export function validateJob(job) {
       else if (seen.has(it.id)) errs.push(`duplicate id ${it.id}`);
       seen.add(it.id);
       if (!TYPES[it.type]) errs.push(`${w}.type: unknown "${it.type}"`);
-      const wallOk = WALLS.includes(it.wall) || it.wall === CEILING;
+      const interiorId = !!(opts && opts.allowInterior && isWallId(it.wall));
+      const wallOk = WALLS.includes(it.wall) || it.wall === CEILING || interiorId;
       if (!wallOk) errs.push(`${w}.wall: invalid`);
       if (!Number.isInteger(it.fromLeftMm) || it.fromLeftMm < 0) errs.push(`${w}.fromLeftMm: invalid`);
       if (!Number.isInteger(it.heightMm) || it.heightMm < 0) errs.push(`${w}.heightMm: invalid`);
@@ -462,8 +757,8 @@ export function validateJob(job) {
         && isFiniteNum(job.room?.widthM) && isFiniteNum(job.room?.depthM) && isFiniteNum(job.room?.heightM)) {
         const trial = { room: job.room };
         const fake = { wall: it.wall, fromLeftMm: it.fromLeftMm, heightMm: it.heightMm };
-        if (fake.fromLeftMm > maxFromLeft(trial, fake)) errs.push(`${w}.fromLeftMm: outside wall`);
-        if (fake.heightMm > maxHeight(trial, fake)) errs.push(`${w}.heightMm: outside room`);
+        if (!interiorId && fake.fromLeftMm > maxFromLeft(trial, fake)) errs.push(`${w}.fromLeftMm: outside wall`);
+        if (!interiorId && fake.heightMm > maxHeight(trial, fake)) errs.push(`${w}.heightMm: outside room`);
       }
     }
   }
@@ -480,7 +775,8 @@ export function validateJob(job) {
   if (typeof ann !== 'object' || Array.isArray(ann)) errs.push('annotations: not an object');
   else {
     for (const view of Object.keys(ann)) {
-      if (!VIEWS.includes(view)) { errs.push(`annotations.${view}: unknown view`); continue; }
+      const faceView = opts && opts.allowInterior && parseFaceView(view);
+      if (!VIEWS.includes(view) && !faceView) { errs.push(`annotations.${view}: unknown view`); continue; }
       const strokes = ann[view];
       if (strokes == null) continue; // sparse backup: normaliseJob fills the missing view with []
       if (!Array.isArray(strokes) || strokes.length > LIMITS.maxStrokesPerView) { errs.push(`annotations.${view}: invalid`); continue; }
@@ -500,7 +796,8 @@ export function validateJob(job) {
   } else {
     for (const [ni, pin] of job.notePins.entries()) {
       const w = `notePins[${ni}]`;
-      if (!pin || typeof pin !== 'object' || !VIEWS.includes(pin.view)) { errs.push(`${w}: invalid`); continue; }
+      const pinFace = opts && opts.allowInterior && pin && parseFaceView(pin.view);
+      if (!pin || typeof pin !== 'object' || (!VIEWS.includes(pin.view) && !pinFace)) { errs.push(`${w}: invalid`); continue; }
       if (!Number.isInteger(pin.x) || !Number.isInteger(pin.y)) errs.push(`${w}: non-finite position`);
       if (typeof pin.text !== 'string' || pin.text.length > 200) errs.push(`${w}: invalid text`);
       if (typeof pin.id !== 'string' || pin.id.length > 64) errs.push(`${w}: invalid id`);
@@ -523,13 +820,15 @@ function floorErrors(job) {
     if (!FLOOR_KEYS.includes(k)) return ['floor: unsupported field'];
   }
   if (!Array.isArray(floor.walls)) return ['floor.walls: not an array'];
-  if (floor.walls.length > 0) return ['floor.walls: not accepted yet'];
+  const wallErr = wallsError(floor.walls, floor.nextWallNo, wallLengthMm(job.room, 'A'), wallLengthMm(job.room, 'B'), job.room);
+  if (wallErr) return [wallErr];
   if (!Array.isArray(floor.routes)) return ['floor.routes: not an array'];
-  if (floor.routes.length > 0) return ['floor.routes: not accepted yet'];
   if (!Array.isArray(floor.zones)) return ['floor.zones: not an array'];
   if (!Number.isInteger(floor.nextWallNo) || floor.nextWallNo < 1) return ['floor.nextWallNo: invalid'];
   if (!Number.isInteger(floor.nextZoneNo) || floor.nextZoneNo < 1) return ['floor.nextZoneNo: invalid'];
   if (!Number.isInteger(floor.nextRouteNo) || floor.nextRouteNo < 1) return ['floor.nextRouteNo: invalid'];
+  const routeErr = routesError(job);
+  if (routeErr) return [routeErr];
   if (floor.zones.length > MAX_ZONES) return ['This floor already has 30 zones, which is the most it can hold.'];
 
   const widthMm = wallLengthMm(job.room, 'A');
@@ -582,10 +881,14 @@ function zoneProblem(z, i, widthMm, depthMm, room, others, nextZoneNo, seen) {
 export function validateJobV2(job) {
   if (!job || typeof job !== 'object' || Array.isArray(job)) return { ok: false, errors: ['not an object'] };
   if (job.schemaVersion !== 2) return { ok: false, errors: ['schemaVersion: expected 2'] };
-  const base = validateJob({ ...job, schemaVersion: SCHEMA_VERSION });
+  const base = validateJob({ ...job, schemaVersion: SCHEMA_VERSION }, { allowInterior: true });
   if (!base.ok) return base;
   const errors = floorErrors(job);
   if (errors.length) return { ok: false, errors };
+  const fitting = interiorFittingError(job.items, job.floor.walls, ceilingHeightMm(job.room));
+  if (fitting) return { ok: false, errors: [fitting] };
+  const marks = interiorMarkError(job, job.floor.walls);
+  if (marks) return { ok: false, errors: [marks] };
   return { ok: true, job };
 }
 
@@ -628,9 +931,9 @@ export function normaliseJobV2(job) {
   if (!f || typeof f !== 'object' || Array.isArray(f)) return out;
   if (!Array.isArray(f.walls) || !Array.isArray(f.zones) || !Array.isArray(f.routes)) return out;
   out.floor = {
-    walls: f.walls.map(w => ({ ...w })),
+    walls: f.walls.map(w => ({ id: w.id, x1: w.x1, y1: w.y1, x2: w.x2, y2: w.y2 })),
     zones: f.zones.map(z => ({ id: z.id, name: z.name, x0: z.x0, y0: z.y0, x1: z.x1, y1: z.y1 })),
-    routes: f.routes.map(r => ({ ...r })),
+    routes: f.routes.map(r => copyRoute(r)),
     nextWallNo: f.nextWallNo,
     nextZoneNo: f.nextZoneNo,
     nextRouteNo: f.nextRouteNo,

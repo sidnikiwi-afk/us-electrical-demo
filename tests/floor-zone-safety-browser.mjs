@@ -13,7 +13,7 @@ const { chromium } = await import(playwrightPath);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SERVE = path.join(ROOT, 'prototype');
 const EV = path.join(ROOT, '.worker-output', 'zone-ui-corrections-evidence');
-const BUILD = 'surface-proto-v13-floor-zones-20261012';
+const BUILD = 'surface-proto-v17-floor-final-20261013';
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -26,6 +26,7 @@ const MIME = {
 fs.mkdirSync(EV, { recursive: true });
 const checks = [];
 let serveMixed = false;
+let servePrintMixed = false;
 
 function fail(message) {
   const err = new Error(message);
@@ -63,6 +64,7 @@ const server = http.createServer((req, res) => {
     }
     let body = data;
     if (serveMixed && rel === 'js/core.js') body = Buffer.from(data.toString('utf8').replaceAll(BUILD, BUILD + '-mixed'));
+    if (servePrintMixed && rel === 'js/floor-print.js') body = Buffer.from(data.toString('utf8').replaceAll(BUILD, BUILD + '-old'));
     res.writeHead(200, {
       'content-type': MIME[path.extname(file)] || 'application/octet-stream',
       'cache-control': 'no-store',
@@ -377,6 +379,29 @@ async function quotaOlderExport() {
   } finally { await context.close(); }
 }
 
+async function printMixedZeroWrite(context) {
+  servePrintMixed = true;
+  const page = await context.newPage();
+  page.setDefaultTimeout(10000);
+  try {
+    await page.goto(baseUrl + '?print-mixed=1', { waitUntil: 'domcontentloaded' });
+    await page.locator('[data-testid="mixed-build"]').waitFor({ state: 'visible' });
+    const before = await page.evaluate(() => JSON.stringify(Object.entries(localStorage).sort()));
+    await page.locator('[data-testid="start-sample"]').click();
+    await page.locator('#btn-job-name').waitFor({ state: 'visible' });
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: false })));
+    const after = await page.evaluate(() => JSON.stringify(Object.entries(localStorage).sort()));
+    if (after !== before) fail(`stale floor-print.js changed storage ${after}`);
+    const banner = await page.locator('[data-testid="mixed-build"]').innerText();
+    if (!banner.includes('Nothing has been saved')) fail(`print mixed banner ${JSON.stringify(banner)}`);
+    await shot(page, 'print-mixed-pagehide.png');
+    checks.push({ step: 'print-mixed-zero-write', sameBytes: after === before, source: sourceHash['prototype/js/ui.js'] });
+  } finally {
+    servePrintMixed = false;
+    await page.close();
+  }
+}
+
 async function mixedZeroWrite(context) {
   serveMixed = true;
   const page = await context.newPage();
@@ -450,6 +475,7 @@ try {
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, serviceWorkers: 'allow' });
   try {
     await mixedZeroWrite(context);
+    await printMixedZeroWrite(context);
   } finally {
     await context.close();
   }

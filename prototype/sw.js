@@ -1,11 +1,11 @@
 // Service worker: cache only this app's own assets, relative to this file,
 // so the app works offline after one successful load under any subdirectory.
-const CACHE = 'surface-proto-v13-floor-zones-20261012';
+const CACHE = 'surface-proto-v17-floor-final-20261013';
 const CACHE_PREFIX = 'surface-proto-';
 // Precache real files only. './' (the directory URL) is deliberately excluded:
 // addAll is atomic and a directory response can vary by server, which would
 // abort the whole install and stop the worker from ever becoming ready.
-const ASSETS = ['./index.html', './css/style.css', './js/ui.js', './js/core.js', './js/jobs.js', './js/jobs-v2.js', './js/floor-zones.js', './manifest.webmanifest'];
+const ASSETS = ['./index.html', './css/style.css', './js/ui.js', './js/core.js', './js/jobs.js', './js/jobs-v2.js', './js/floor-zones.js', './js/floor-walls.js', './js/floor-routes.js', './js/floor-print.js', './manifest.webmanifest'];
 
 // cache: 'reload' goes past the browser's HTTP cache, so a long max-age can't
 // put an older file into a new version's cache. Still all-or-nothing.

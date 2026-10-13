@@ -1,3 +1,16 @@
+# Floor final, 13 October 2026
+
+Build `surface-proto-v17-floor-final-20261013` adds interior walls, face views, containment runs, and the zoned print pack, on top of named zones.
+
+- Build adds straight interior walls. Each wall has two faces. A face view shows that side, with dimensions. When a zone is selected, the face is clipped to the part that belongs to the zone. A face on a zone edge is titled like "North wall (W6)".
+- Trunking and conduit can be drawn on a face. They are not priced and do not appear in the quote, the labour breakdown, or the CSV. The warning reads: Containment isn't priced or measured in this version.
+- Print offers the whole floor or ticked zones, and all layers or the layers currently shown. The pack is a floor overview, one sheet per chosen wall face, and the labour breakdown. A job with no zones, interior walls, or containment still prints the original four-page pack. A wall sheet with no fittings says "No fittings on this wall." A shared boundary prints each zone name on its own side.
+- Creating a zone selects that zone. Changing the zone menu keeps a fitting selected when that fitting is still in view.
+- Version-two storage is unchanged. Older records stay untouched, and older apps cannot read version-two exports. Download backups before switching versions.
+- Real iPad, Apple Pencil, Surface pen, and Safari remain untested. Prices are still examples. This prototype makes no electrical compliance claims.
+
+---
+
 # Zones release, 13 October 2026
 
 Build `surface-proto-v13-floor-zones-20261012` adds named rectangular zones,
