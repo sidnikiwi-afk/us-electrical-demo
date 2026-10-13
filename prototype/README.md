@@ -10,6 +10,21 @@ backups and a print pack.
 tool. Tested with simulated pen and touch — not yet tried on a real iPad or Surface,
 and palm rejection is unverified.**
 
+## Zones update
+
+Build mode adds named rectangular zones to a saved floor. Enter dimensions or
+resize the zone with its edge handles. Select a zone to show its relevant
+exterior wall views; zones do not create walls. The phone details panel folds
+away to leave room for the drawing.
+
+This release includes zones only. Interior wall editing, trunking/conduit and
+new print layouts are still in development. The existing print pack and PDF
+quick guide cover the original fitting tools.
+
+Older jobs are offered as copies in separate version-two storage. Their original
+records stay untouched. Download a backup before switching versions. Older
+versions cannot read version-two backups; retain both versions' exports.
+
 ## Run it
 
 ```sh
