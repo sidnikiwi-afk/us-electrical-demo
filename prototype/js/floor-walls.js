@@ -2,6 +2,7 @@
 // Offsets are viewed-from-left: S=x-x1, N=x2-x, W=y-y1, E=y2-y.
 // Route records live in floor-routes.js and use these same offsets.
 
+export const BUILD = 'surface-proto-v17-floor-final-20261013';
 export const MAX_WALLS = 50;
 export const MIN_WALL_MM = 100;
 const WALL_KEYS = ['id', 'x1', 'y1', 'x2', 'y2'];

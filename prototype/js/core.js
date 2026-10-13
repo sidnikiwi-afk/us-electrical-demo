@@ -19,6 +19,7 @@ import {
 import {
   carriedRun,
   copyRoute,
+  faceAllowed,
   routesError,
   runOffWall,
   wallGeometry,
@@ -26,7 +27,7 @@ import {
 
 export const SCHEMA = 'surface-job';
 export const SCHEMA_VERSION = 1;
-export const BUILD = 'surface-proto-v16-floor-print-20261013';
+export const BUILD = 'surface-proto-v17-floor-final-20261013';
 
 export const LIMITS = {
   maxWallM: 20,        // room width / depth
@@ -325,6 +326,9 @@ export function removeWall(job, id) {
 export function faceOffsetToPlan(job, wallId, face, offsetMm) {
   const wall = wallGeometry(job, wallId);
   if (!wall) throw new Error(MSG.missingWall);
+  // Exterior walls only have an inner face. The outer face is refused here,
+  // the same rule routes use, so a north offset on wall A cannot become a point.
+  if (!faceAllowed(wall, face)) throw new Error(MSG.badFace);
   const plan = planFromOffset(wall, face, offsetMm);
   if (!plan) throw new Error(MSG.badFace);
   return { x: plan.x, y: plan.y };

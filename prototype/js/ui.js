@@ -8,9 +8,9 @@ import * as Walls from './floor-walls.js';
 import * as Routes from './floor-routes.js';
 import * as Print from './floor-print.js';
 
-const BUILD = 'surface-proto-v16-floor-print-20261013';
+const BUILD = 'surface-proto-v17-floor-final-20261013';
 const CONTAINMENT_WARNING = "Containment isn't priced or measured in this version.";
-const buildMixed = BUILD !== C.BUILD || BUILD !== J.BUILD;
+const buildMixed = BUILD !== C.BUILD || BUILD !== J.BUILD || BUILD !== F.BUILD || BUILD !== Walls.BUILD || BUILD !== Routes.BUILD || BUILD !== Print.BUILD;
 
 const NS = 'http://www.w3.org/2000/svg';
 
@@ -1444,6 +1444,46 @@ function paintRoutePreview(content, H, clip) {
     'stroke-width': 40, 'stroke-dasharray': '80 50', 'pointer-events': 'none',
   }, content);
 }
+function worldAtClient(clientX, clientY) {
+  const svg = $('#canvas');
+  const world = $('#world');
+  if (!svg || !world) return null;
+  const ctm = world.getScreenCTM();
+  if (!ctm) return null;
+  const pt = svg.createSVGPoint();
+  pt.x = clientX;
+  pt.y = clientY;
+  try { return pt.matrixTransform(ctm.inverse()); }
+  catch { return null; }
+}
+// Captions sit below the dimension labels. "Wall continues" sits below the
+// floating Layers and zoom controls, which overlay the top of the canvas.
+function faceChromeYs(x0, x1, H) {
+  const svg = $('#canvas');
+  const rect = svg && svg.getBoundingClientRect();
+  let continueY = 420;
+  if (rect && rect.height > 0) {
+    const below = worldAtClient(rect.left + rect.width / 2, rect.top + 68);
+    if (below && Number.isFinite(below.y)) continueY = below.y + 180;
+  }
+  if (continueY < 160) continueY = 160;
+  if (continueY > H - 600) continueY = Math.max(160, Math.min(420, H - 600));
+  const span = Math.max(0, x1 - x0);
+  return {
+    rulerY: H + 200,
+    captionY: H + 720,
+    leftY: continueY,
+    rightY: span < 2800 ? Math.min(continueY + 220, H - 480) : continueY,
+  };
+}
+function paintWallContinues(content, x, y, anchor) {
+  const c = svgEl('text', {
+    x, y, 'font-size': 160, fill: '#555', 'font-family': 'inherit',
+    'text-anchor': anchor, 'data-testid': 'wall-continues',
+  }, content);
+  c.textContent = 'Wall continues';
+  return c;
+}
 function renderWall(content, wall, { W, D, H }, forPrint = false, show = isShown) {
   const fullL = (wall === 'A' || wall === 'C') ? W : D;
   const face = forPrint ? null : zoneFaceFor(wall);
@@ -1453,7 +1493,8 @@ function renderWall(content, wall, { W, D, H }, forPrint = false, show = isShown
   svgEl('line', { x1: x0, y1: H, x2: x1, y2: H, stroke: '#1a1a1a', 'stroke-width': 40 }, content); // floor line
   const hT = svgEl('text', { x: x1 + 380, y: H / 2, 'font-size': 240, fill: '#555', 'font-family': 'inherit', 'text-anchor': 'middle', transform: `rotate(-90 ${x1 + 380} ${H / 2})` }, content);
   hT.textContent = `${job.room.heightM.toFixed(2)} m`;
-  const lT = svgEl('text', { x: (x0 + x1) / 2, y: H + 420, 'font-size': 220, fill: '#23324d', 'text-anchor': 'middle', 'font-family': 'inherit', 'data-testid': 'wall-caption' }, content);
+  const chrome = face ? faceChromeYs(x0, x1, H) : null;
+  const lT = svgEl('text', { x: (x0 + x1) / 2, y: chrome ? chrome.captionY : H + 420, 'font-size': 200, fill: '#23324d', 'text-anchor': 'middle', 'font-family': 'inherit', 'data-testid': 'wall-caption' }, content);
   if (face) {
     const z = activeZone();
     lT.textContent = `${z ? z.name : 'Zone'} · Wall ${wall} · ${(face.fromMm / 1000).toFixed(2)} to ${(face.toMm / 1000).toFixed(2)} m of ${(fullL / 1000).toFixed(2)} m`;
@@ -1462,18 +1503,12 @@ function renderWall(content, wall, { W, D, H }, forPrint = false, show = isShown
       fill: '#fff', stroke: '#1a1a1a', 'stroke-width': 25,
     }, content);
     for (const mm of [face.fromMm, face.toMm]) {
-      svgEl('line', { x1: mm, y1: H, x2: mm, y2: H + 120, stroke: '#23324d', 'stroke-width': 12 }, content);
-      const tick = svgEl('text', { x: mm, y: H + 280, 'font-size': 160, fill: '#23324d', 'text-anchor': 'middle', 'data-testid': 'wall-ruler' }, content);
+      svgEl('line', { x1: mm, y1: H, x2: mm, y2: H + 90, stroke: '#23324d', 'stroke-width': 12 }, content);
+      const tick = svgEl('text', { x: mm, y: chrome.rulerY, 'font-size': 150, fill: '#23324d', 'text-anchor': 'middle', 'data-testid': 'wall-ruler' }, content);
       tick.textContent = `${(mm / 1000).toFixed(2)} m`;
     }
-    if (face.fromMm > 0) {
-      const c = svgEl('text', { x: x0, y: -80, 'font-size': 180, fill: '#555', 'data-testid': 'wall-continues' }, content);
-      c.textContent = 'Wall continues';
-    }
-    if (face.toMm < fullL) {
-      const c = svgEl('text', { x: x1, y: -80, 'font-size': 180, fill: '#555', 'text-anchor': 'end', 'data-testid': 'wall-continues' }, content);
-      c.textContent = 'Wall continues';
-    }
+    if (face.fromMm > 0) paintWallContinues(content, x0 + 50, chrome.leftY, 'start');
+    if (face.toMm < fullL) paintWallContinues(content, x1 - 50, chrome.rightY, 'end');
     const outsideF = job.items.filter(i => i.wall === wall && i.wall !== C.CEILING && !F.fittingOnFace(i, face)).length;
     const outsideFace = exteriorFace(wall);
     const outsideR = routesOf().filter(r => r && r.wall === wall && r.face === outsideFace && (r.startMm < face.fromMm || r.endMm > face.toMm)).length;
@@ -1559,23 +1594,18 @@ function renderInteriorFace(content, parsed, { H }, show = isShown) {
     x: x0, y: 0, width: Math.max(1, x1 - x0), height: H,
     fill: '#fff', stroke: '#1a1a1a', 'stroke-width': 25,
   }, content);
-  const lT = svgEl('text', { x: (x0 + x1) / 2, y: H + 420, 'font-size': 220, fill: '#23324d', 'text-anchor': 'middle', 'font-family': 'inherit', 'data-testid': 'wall-caption' }, content);
+  const chrome = (clip && zoneId) ? faceChromeYs(x0, x1, H) : null;
+  const lT = svgEl('text', { x: (x0 + x1) / 2, y: chrome ? chrome.captionY : H + 720, 'font-size': 200, fill: '#23324d', 'text-anchor': 'middle', 'font-family': 'inherit', 'data-testid': 'wall-caption' }, content);
   if (clip && zoneId) {
     const z = activeZone();
     lT.textContent = `${z ? z.name : 'Zone'} · ${sideLabel} · ${(clip.fromMm / 1000).toFixed(2)} to ${(clip.toMm / 1000).toFixed(2)} m of ${(fullL / 1000).toFixed(2)} m`;
     for (const mm of [clip.fromMm, clip.toMm]) {
-      svgEl('line', { x1: mm, y1: H, x2: mm, y2: H + 120, stroke: '#23324d', 'stroke-width': 12 }, content);
-      const tick = svgEl('text', { x: mm, y: H + 280, 'font-size': 160, fill: '#23324d', 'text-anchor': 'middle', 'data-testid': 'wall-ruler' }, content);
+      svgEl('line', { x1: mm, y1: H, x2: mm, y2: H + 90, stroke: '#23324d', 'stroke-width': 12 }, content);
+      const tick = svgEl('text', { x: mm, y: chrome.rulerY, 'font-size': 150, fill: '#23324d', 'text-anchor': 'middle', 'data-testid': 'wall-ruler' }, content);
       tick.textContent = `${(mm / 1000).toFixed(2)} m`;
     }
-    if (clip.fromMm > 0) {
-      const c = svgEl('text', { x: x0, y: -80, 'font-size': 180, fill: '#555', 'data-testid': 'wall-continues' }, content);
-      c.textContent = 'Wall continues';
-    }
-    if (clip.toMm < fullL) {
-      const c = svgEl('text', { x: x1, y: -80, 'font-size': 180, fill: '#555', 'text-anchor': 'end', 'data-testid': 'wall-continues' }, content);
-      c.textContent = 'Wall continues';
-    }
+    if (clip.fromMm > 0) paintWallContinues(content, x0 + 50, chrome.leftY, 'start');
+    if (clip.toMm < fullL) paintWallContinues(content, x1 - 50, chrome.rightY, 'end');
     const outsideF = job.items.filter(i => i.wall === parsed.id && i.face === parsed.face && !F.fittingOnFace(i, clip)).length;
     const outsideR = ((job.floor && job.floor.routes) || []).filter(r => r && r.wall === parsed.id && r.face === parsed.face && (r.startMm < clip.fromMm || r.endMm > clip.toMm || r.startMm > clip.toMm || r.endMm < clip.fromMm)).length;
     const sentence = outsideFaceSentence(outsideF, outsideR);
@@ -1586,8 +1616,8 @@ function renderInteriorFace(content, parsed, { H }, show = isShown) {
   } else {
     lT.textContent = `${sideLabel} · ${(fullL / 1000).toFixed(2)} m`;
     for (const mm of [0, fullL]) {
-      svgEl('line', { x1: mm, y1: H, x2: mm, y2: H + 120, stroke: '#23324d', 'stroke-width': 12 }, content);
-      const tick = svgEl('text', { x: mm, y: H + 280, 'font-size': 160, fill: '#23324d', 'text-anchor': 'middle', 'data-testid': 'wall-ruler' }, content);
+      svgEl('line', { x1: mm, y1: H, x2: mm, y2: H + 90, stroke: '#23324d', 'stroke-width': 12 }, content);
+      const tick = svgEl('text', { x: mm, y: H + 200, 'font-size': 150, fill: '#23324d', 'text-anchor': 'middle', 'data-testid': 'wall-ruler' }, content);
       tick.textContent = `${(mm / 1000).toFixed(2)} m`;
     }
   }
@@ -1803,20 +1833,20 @@ function renderLayers() {
 // ---- Tabs, quote bar, inspector ----------------------------------------------
 function activeZone() { return zoneId ? F.zoneById(job, zoneId) : null; }
 function renderZoneNotes(host) {
-  const notes = el('div', { class: 'zone-notes' + (zoneNotesOpen ? ' zone-notes-open' : ''), 'data-testid': 'zone-notes' });
   const z = activeZone();
-  const faces = z ? F.zoneTouchingFaces(job, z) : [];
-  if (!z) notes.appendChild(el('p', {}, '\u00a0'));
-  else if (!faces.length) notes.appendChild(el('p', {}, 'This zone has no walls yet. Add one in Build mode.'));
-  else {
-    const lines = F.edgeNotes(z, faces);
-    const shown = zoneNotesOpen ? lines : lines.slice(0, 2);
-    for (const line of shown) notes.appendChild(el('p', {}, line));
-    if (!zoneNotesOpen && lines.length > 2) {
-      const more = el('button', { type: 'button', 'data-testid': 'zone-notes-more' }, 'More');
-      more.addEventListener('click', () => { zoneNotesOpen = true; renderTabs(); });
-      notes.appendChild(more);
-    }
+  if (!z) return;
+  const faces = F.zoneTouchingFaces(job, z);
+  const lines = faces.length
+    ? F.edgeNotes(z, faces)
+    : ['This zone has no walls yet. Add one in Build mode.'];
+  if (!lines.length) return;
+  const notes = el('div', { class: 'zone-notes' + (zoneNotesOpen ? ' zone-notes-open' : ''), 'data-testid': 'zone-notes' });
+  const shown = zoneNotesOpen ? lines : lines.slice(0, 2);
+  for (const line of shown) notes.appendChild(el('p', {}, line));
+  if (!zoneNotesOpen && lines.length > 2) {
+    const more = el('button', { type: 'button', 'data-testid': 'zone-notes-more' }, 'More');
+    more.addEventListener('click', () => { zoneNotesOpen = true; renderTabs(); });
+    notes.appendChild(more);
   }
   host.appendChild(notes);
 }
@@ -1998,6 +2028,13 @@ function applyZoneEdits(z, fields, onDone) {
   toast(`Updated ${name.trim() || z.name}.`);
   if (onDone) onDone();
 }
+function selectNewZone(id) {
+  zoneId = id;
+  selectedId = null;
+  selectedRoute = null;
+  selectedWall = null;
+  multiIds = null;
+}
 function addZoneFromFields(fields) {
   const name = fields.name.value;
   const x0 = readWholeMm(fields.x0);
@@ -2011,8 +2048,7 @@ function addZoneFromFields(fields) {
   let id = null;
   commit(() => {
     id = C.addZone(job, { name, x0, y0, x1: x0 + width, y1: y0 + depth });
-    zoneId = id;
-    if (selectedId && !selectionVisible(selectedId, id)) selectedId = null;
+    if (id) selectNewZone(id);
   }, { exact: true });
   if (!id || !F.zoneById(job, id)) return false;
   const made = F.zoneById(job, id);
@@ -2885,6 +2921,8 @@ function renderAll() {
 function syncFooterHeight() {
   const bar = $('#quote-bar');
   if (bar) document.documentElement.style.setProperty('--footer-h', (bar.offsetHeight + 2) + 'px');
+  const top = $('#topbar');
+  if (top) document.documentElement.style.setProperty('--topbar-h', top.offsetHeight + 'px');
   // the floating tool dock (layout A) starts below the view tabs, which wrap
   const tabs = $('#view-tabs');
   if (tabs) document.documentElement.style.setProperty('--tabs-h', tabs.offsetHeight + 'px');
@@ -3131,6 +3169,9 @@ function printLegend() {
   return legend;
 }
 function fittingTable(items, ceilingCoords = false) {
+  if (!items.length && !ceilingCoords) {
+    return el('p', { 'data-testid': 'print-no-fittings' }, 'No fittings on this wall.');
+  }
   const t = el('table');
   const head = el('tr');
   const cols = ceilingCoords ? ['ID', 'Type', 'x (mm)', 'y (mm)', 'Notes'] : ['ID', 'Type', 'From left (mm)', 'Height (mm)', 'Notes'];
@@ -3257,7 +3298,7 @@ function renderPrintKey(sheet, dims, show) {
   if (red) {
     svgEl('line', {
       x1: red.x1, y1: red.y1, x2: red.x2, y2: red.y2,
-      stroke: '#d00000', 'stroke-width': 80, 'data-testid': 'print-key-wall',
+      stroke: '#d00000', 'stroke-width': 240, 'data-testid': 'print-key-wall',
     }, svg);
   }
   const nudge = { N: [0, -120], S: [0, 120], E: [120, 0], W: [-120, 0] };
@@ -3322,11 +3363,24 @@ function renderPrintElevation(sheet, dims, show, includeInk) {
       stroke: '#1a1a1a', 'stroke-width': 16, 'stroke-dasharray': '70 40',
       'data-testid': 'print-zone-boundary', 'data-at': String(boundary.atMm),
     }, svg);
-    const label = svgEl('text', {
-      x: boundary.atMm, y: -80, 'text-anchor': 'middle', 'font-size': 170, fill: '#1a1a1a', 'font-family': 'inherit',
-      'data-testid': 'print-zone-boundary-label',
-    }, svg);
-    label.textContent = boundary.names.join(', ');
+    const paintSide = (names, side) => {
+      if (!names || !names.length) return;
+      const label = svgEl('text', {
+        x: boundary.atMm + (side === 'left' ? -70 : 70), y: -80,
+        'text-anchor': side === 'left' ? 'end' : 'start',
+        'font-size': 170, fill: '#1a1a1a', 'font-family': 'inherit',
+        'data-testid': 'print-zone-boundary-label', 'data-side': side,
+      }, svg);
+      label.textContent = names.join(', ');
+    };
+    const left = boundary.left || [];
+    const right = boundary.right || [];
+    if (left.length || right.length) {
+      paintSide(left, 'left');
+      paintSide(right, 'right');
+    } else if (boundary.names && boundary.names.length) {
+      paintSide(boundary.names, 'right');
+    }
   }
   for (const item of fittingsForSheet(sheet, show)) {
     const g = fittingGlyph(item, item.fromLeftMm, H - item.heightMm);
@@ -3363,6 +3417,7 @@ function drawFullPlan(parent, dims, show) {
   finally { zoneId = savedZone; view = savedView; }
 }
 function buildPrintPack(includeInk = true, layers = null, sheetChoice = null) {
+  if (window.__SURFACE_TEST__ && window.__SURFACE_TEST__.printIncludeInk === false) includeInk = false;
   const choice = sheetChoice || { whole: true, zoneIds: [] };
   if (choice.whole && Print.useLegacyPack(job)) buildLegacyPrintPack(includeInk, layers);
   else buildZonePrintPack(includeInk, layers, choice);
@@ -3397,16 +3452,24 @@ function buildLegacyPrintPack(includeInk = true, layers = null) {
     if (viewName === 'PLAN') {
       vbW = dims.W + 1600; vbH = dims.D + 1600;
       svg.setAttribute('viewBox', `-800 -800 ${vbW} ${vbH}`);
-      const saved = job.annotations.PLAN; if (!includeInk) job.annotations.PLAN = [];
-      renderPlan(tmpWorld, dims, show);
-      if (!includeInk) job.annotations.PLAN = saved;
+      const saved = job.annotations.PLAN;
+      try {
+        if (!includeInk) job.annotations.PLAN = [];
+        renderPlan(tmpWorld, dims, show);
+      } finally {
+        if (!includeInk) job.annotations.PLAN = saved;
+      }
     } else {
       const L = (viewName === 'A' || viewName === 'C') ? dims.W : dims.D;
       vbW = L + 1600; vbH = dims.H + 1600;
       svg.setAttribute('viewBox', `-800 -800 ${vbW} ${vbH}`);
-      const saved = job.annotations[viewName]; if (!includeInk) job.annotations[viewName] = [];
-      renderWall(tmpWorld, viewName, dims, true, show);
-      if (!includeInk) job.annotations[viewName] = saved;
+      const saved = job.annotations[viewName];
+      try {
+        if (!includeInk) job.annotations[viewName] = [];
+        renderWall(tmpWorld, viewName, dims, true, show);
+      } finally {
+        if (!includeInk) job.annotations[viewName] = saved;
+      }
     }
     while (tmpWorld.firstChild) svg.appendChild(tmpWorld.firstChild);
     return svg;
@@ -3475,10 +3538,17 @@ function buildZonePrintPack(includeInk, layers, choice) {
   const planSvg = document.createElementNS(NS, 'svg');
   planSvg.setAttribute('data-testid', 'print-overview-plan');
   planSvg.setAttribute('viewBox', `-800 -800 ${dims.W + 1600} ${dims.D + 1600}`);
-  const savedPlan = includeInk ? null : job.annotations.PLAN;
-  if (!includeInk) job.annotations.PLAN = [];
-  drawFullPlan(planSvg, dims, show);
-  if (!includeInk) job.annotations.PLAN = savedPlan;
+  const dropInk = !includeInk;
+  const savedPlan = job.annotations.PLAN;
+  try {
+    if (dropInk) job.annotations.PLAN = [];
+    if (dropInk && window.__SURFACE_TEST__ && window.__SURFACE_TEST__.throwDuringPrint) {
+      throw new Error('print draw failed');
+    }
+    drawFullPlan(planSvg, dims, show);
+  } finally {
+    if (dropInk) job.annotations.PLAN = savedPlan;
+  }
   overview.appendChild(planSvg);
   overview.appendChild(printLegend());
   overview.appendChild(el('p', {}, `${job.room.widthM.toFixed(2)} × ${job.room.depthM.toFixed(2)} × ${job.room.heightM.toFixed(2)} m (w × d × h)`));
@@ -5092,8 +5162,7 @@ function finishZoneTap(p) {
     id = C.addZone(job, {
       name, x0: Math.min(a.x, snapped.x), y0: Math.min(a.y, snapped.y), x1: Math.max(a.x, snapped.x), y1: Math.max(a.y, snapped.y),
     });
-    zoneId = id;
-    if (selectedId && !selectionVisible(selectedId, id)) selectedId = null;
+    if (id) selectNewZone(id);
   }, { exact: true });
   zoneTool = { first: null };
   if (id && F.zoneById(job, id)) {

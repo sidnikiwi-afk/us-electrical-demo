@@ -9,6 +9,7 @@ import {
   wallLength,
 } from './floor-walls.js';
 
+export const BUILD = 'surface-proto-v17-floor-final-20261013';
 export const MAX_ROUTES = 100;
 export const MIN_ROUTE_MM = 50;
 export const MAX_NOTES = 200;
@@ -81,7 +82,8 @@ export function routeRecordError(route, index, job, nextRouteNo, seen) {
   if (!faceAllowed(wall, route.face)) return `${at}.face: that face is not on this wall`;
   if (![route.startMm, route.endMm, route.heightMm].every(Number.isInteger)) return 'A run must use whole millimetres.';
   const length = wallLength(wall);
-  if (route.startMm < 0 || route.endMm > length || route.startMm >= route.endMm) return offWallMessage(length);
+  // Equal ends are on the wall but have no length. A reversed pair is not a run on the wall.
+  if (route.startMm < 0 || route.endMm > length || route.startMm > route.endMm) return offWallMessage(length);
   if (route.endMm - route.startMm < MIN_ROUTE_MM) return 'A run must be at least 50 mm long.';
   const ceiling = ceilingMm(job && job.room);
   if (route.heightMm < 0 || route.heightMm > ceiling) return `Height must be 0 to ${ceiling} mm.`;

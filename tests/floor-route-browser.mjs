@@ -185,6 +185,24 @@ async function waitToast(page, needle) {
   }, needle);
 }
 
+async function assertToastClearsSaveChip(page) {
+  const problem = await page.evaluate(() => {
+    const toast = document.querySelector('[data-testid="toast"]');
+    const chip = document.querySelector('#save-chip');
+    if (!toast || toast.hidden || !chip) return 'toast or save chip missing';
+    const a = toast.getBoundingClientRect();
+    const b = chip.getBoundingClientRect();
+    const overlap = a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+    if (overlap) return 'toast covers save chip';
+    const bar = document.querySelector('#topbar');
+    if (!bar) return 'top bar missing';
+    const top = bar.getBoundingClientRect();
+    if (a.top < top.bottom - 1) return 'toast overlaps top bar';
+    return null;
+  });
+  if (problem) fail(problem);
+}
+
 async function ensureDetails(page, touch, testid) {
   const field = page.locator(`#inspector [data-testid="${testid}"]`);
   if (await field.count() && await field.first().isVisible()) return field;
@@ -402,6 +420,7 @@ async function runProfile(browserHandle, prof) {
     await end.fill('1020');
     await press(page.locator('#inspector [data-testid="route-apply"]'), prof.touch);
     await waitToast(page, 'A run must be at least 50 mm long.');
+    if (prof.key.startsWith('phone') || prof.key.startsWith('narrow')) await assertToastClearsSaveChip(page);
     if (await historyCount(page) !== beforeShort) fail('short edit added a history frame');
     if ((await page.locator('#inspector [data-testid="route-end"]').inputValue()) !== storedEnd) fail('short edit kept the refused end');
 

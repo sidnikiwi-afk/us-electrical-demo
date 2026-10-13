@@ -46,7 +46,10 @@ function zonedJob() {
   job.room = { widthM: 9, depthM: 6, heightM: 2.7 };
   C.addZone(job, { name: 'Cutting floor', x0: 0, y0: 0, x1: 3000, y1: 4000 });
   C.addZone(job, { name: 'Waiting and till', x0: 3000, y0: 0, x1: 6000, y1: 4000 });
+  C.addZone(job, { name: 'Store', x0: 0, y0: 4000, x1: 3000, y1: 6000 });
   const wall = C.addWall(job, { x1: 500, y1: 2000, x2: 2500, y2: 2000 });
+  C.addWall(job, { x1: 0, y1: 4000, x2: 3000, y2: 4000 });
+  job.annotations.PLAN = [{ points: [[100, 200], [800, 900]] }];
   C.placeItem(job, 'surface', wall, 400, 450, 'North socket', 'N');
   C.placeItem(job, 'surface', wall, 400, 450, 'South socket', 'S');
   C.placeItem(job, 'switch', 'A', 500, 1200, 'Entry switch');
@@ -113,6 +116,30 @@ async function press(locator, touch) {
   await locator.scrollIntoViewIfNeeded();
   if (touch) await locator.tap();
   else await locator.click();
+}
+
+async function assertChoiceRow(page, testid) {
+  const input = page.locator(`#modal-root [data-testid="${testid}"]`);
+  await input.scrollIntoViewIfNeeded();
+  const problem = await input.evaluate((el) => {
+    const label = el.closest('label');
+    const text = label && label.querySelector('span');
+    if (!label || !text) return 'choice has no label';
+    const ir = el.getBoundingClientRect();
+    const tr = text.getBoundingClientRect();
+    const lr = label.getBoundingClientRect();
+    const overlap = Math.min(ir.bottom, tr.bottom) - Math.max(ir.top, tr.top);
+    if (overlap <= 0) return 'control and text are not on one row';
+    if (lr.height < 44) return `row is ${Math.round(lr.height)}px`;
+    if (ir.width > 32 || ir.height > 32) return `control is ${Math.round(ir.width)}x${Math.round(ir.height)}`;
+    if (el.disabled) {
+      const color = getComputedStyle(label).color;
+      const m = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+      if (!m || Number(m[1]) < 100 || Number(m[2]) < 100 || Number(m[3]) < 100) return `disabled colour ${color}`;
+    }
+    return null;
+  });
+  if (problem) fail(`${testid}: ${problem}`);
 }
 
 async function reachable(locator, label) {
@@ -225,10 +252,17 @@ async function runProfile(browserHandle, prof) {
     const waiting = sheets.getByRole('checkbox', { name: 'Waiting and till' });
     if (!(await whole.isChecked())) fail('Whole floor scope did not tick Whole floor');
     if (await cutting.isChecked() || await waiting.isChecked()) fail('zone boxes were ticked in Whole floor scope');
-    if (!/\b6 sheets\b/.test(await sheets.innerText())) fail(`whole floor count ${JSON.stringify(await sheets.innerText())}`);
-    await reachable(whole, 'Whole floor checkbox');
-    await reachable(cutting, 'Cutting floor checkbox');
-    await reachable(waiting, 'Waiting and till checkbox');
+    if (!/\b8 sheets\b/.test(await sheets.innerText())) fail(`whole floor count ${JSON.stringify(await sheets.innerText())}`);
+    await assertChoiceRow(page, 'print-scope-all');
+    await assertChoiceRow(page, 'print-scope-shown');
+    await assertChoiceRow(page, 'print-whole');
+    await assertChoiceRow(page, 'print-zone-Z1');
+    await assertChoiceRow(page, 'print-zone-Z2');
+    await assertChoiceRow(page, 'print-zone-Z3');
+    const choiceRow = (testid) => page.locator(`#modal-root [data-testid="${testid}"]`).locator('xpath=..');
+    await reachable(choiceRow('print-whole'), 'Whole floor checkbox');
+    await reachable(choiceRow('print-zone-Z1'), 'Cutting floor checkbox');
+    await reachable(choiceRow('print-zone-Z2'), 'Waiting and till checkbox');
     await reachable(page.locator('[data-testid="print-go"]'), 'Print');
     await reachable(page.locator('#modal-root').getByRole('button', { name: 'Cancel', exact: true }), 'Cancel');
     await page.screenshot({ path: path.join(dir, 'dialog.png') });
@@ -242,7 +276,7 @@ async function runProfile(browserHandle, prof) {
     if (!(await zoneDialog.getByRole('checkbox', { name: 'Cutting floor' }).isChecked())) fail('zone scope did not tick Cutting floor');
     if (await zoneDialog.getByRole('checkbox', { name: 'Waiting and till' }).isChecked()) fail('zone scope ticked the other zone');
     const zoneCount = await zoneDialog.innerText();
-    if (!/\b4 sheets\b/.test(zoneCount) || zoneCount.includes('shared by the ticked zones')) fail(`zone default count ${JSON.stringify(zoneCount)}`);
+    if (!/\b5 sheets\b/.test(zoneCount) || zoneCount.includes('shared by the ticked zones')) fail(`zone default count ${JSON.stringify(zoneCount)}`);
     await cancelPrint(page, prof.touch);
     await page.locator('[data-testid="zone-select"]').selectOption({ value: '' });
     steps.push('dialog-zone-scope');
@@ -252,7 +286,7 @@ async function runProfile(browserHandle, prof) {
     await again.getByRole('checkbox', { name: 'Cutting floor' }).check();
     await again.getByRole('checkbox', { name: 'Waiting and till' }).check();
     const both = await again.innerText();
-    if (!/\b4 sheets\b/.test(both) || !both.includes('1 wall is shared by the ticked zones and prints once.')) fail(`shared count ${JSON.stringify(both)}`);
+    if (!/\b5 sheets\b/.test(both) || !both.includes('1 wall is shared by the ticked zones and prints once.')) fail(`shared count ${JSON.stringify(both)}`);
     const stored = await storedJob(page);
     const state = await screenState(page);
     await goPrint(page, prof.touch);
@@ -261,7 +295,8 @@ async function runProfile(browserHandle, prof) {
     const d = heads.indexOf('Cutting floor · West wall (D)');
     const n = heads.indexOf('Cutting floor · W1 north side');
     const s = heads.indexOf('Cutting floor · W1 south side');
-    if (!(a > 0 && a < d && d < n && n < s && s === heads.length - 2 && heads[heads.length - 1] === LABOUR)) fail(`sheet order ${JSON.stringify(heads)}`);
+    const edge = heads.indexOf('Cutting floor · South wall (W2)');
+    if (!(a > 0 && a < d && d < n && n < s && s < edge && edge === heads.length - 2 && heads[heads.length - 1] === LABOUR)) fail(`sheet order ${JSON.stringify(heads)}`);
     if (heads.some((h) => /\((B|C)\)$/.test(h) || h.includes('Waiting and till · West') || h.includes('Waiting and till · W1'))) fail(`unticked walls printed ${JSON.stringify(heads)}`);
     const packText = await page.locator('#print-pack').innerText();
     if (!packText.includes('Looking north · 0.00 to 6.00 m of 9.00 m · key plan shows this wall in red')) fail('A subtitle missing the hull range');
@@ -288,8 +323,22 @@ async function runProfile(browserHandle, prof) {
       dash: el.getAttribute('stroke-dasharray'),
     }));
     if (boundary.at !== '3000' || boundary.dash !== '70 40') fail(`A boundary ${JSON.stringify(boundary)}`);
-    const boundaryLabel = await (await sheetText(page, 'A', 'S')).locator('[data-testid="print-zone-boundary-label"]').textContent();
-    if (!boundaryLabel.includes('Cutting floor') || !boundaryLabel.includes('Waiting and till')) fail(`boundary label ${JSON.stringify(boundaryLabel)}`);
+    const boundaryLabels = await (await sheetText(page, 'A', 'S')).locator('[data-testid="print-zone-boundary-label"]').evaluateAll((els) => els.map((el) => ({
+      side: el.getAttribute('data-side'),
+      text: el.textContent || '',
+    })));
+    const leftName = boundaryLabels.find((row) => row.side === 'left');
+    const rightName = boundaryLabels.find((row) => row.side === 'right');
+    if (!leftName || !leftName.text.includes('Cutting floor') || !rightName || !rightName.text.includes('Waiting and till')) {
+      fail(`boundary names ${JSON.stringify(boundaryLabels)}`);
+    }
+    const emptyWall = await (await sheetText(page, 'D', 'E')).innerText();
+    if (!emptyWall.includes('No fittings on this wall.')) fail(`empty wall sheet ${JSON.stringify(emptyWall)}`);
+    if (await (await sheetText(page, 'A', 'S')).locator('[data-testid="print-legend"]').count() !== 1) fail('wall sheet legend was not once');
+    const legendPx = await (await sheetText(page, 'A', 'S')).locator('[data-testid="print-legend"]').evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+    if (!(legendPx > 0 && legendPx < 16)) fail(`legend size ${legendPx}`);
+    const keyStroke = Number(await (await sheetText(page, 'A', 'S')).locator('[data-testid="print-key-wall"]').getAttribute('stroke-width'));
+    if (!(keyStroke >= 240)) fail(`key plan stroke ${keyStroke}`);
     if (await page.locator('[data-testid="print-zones"]').evaluate((el) => el.tagName) !== 'OL') fail('zones are not a numbered list');
     if (await page.locator('[data-testid="print-routes"]').evaluate((el) => el.tagName) !== 'OL') fail('routes are not a numbered list');
     if ((await storedJob(page)) !== stored) fail('printing changed stored data');
@@ -297,6 +346,16 @@ async function runProfile(browserHandle, prof) {
     if (JSON.stringify(C.breakdown(zoned)) !== priceBefore) fail('price changed in the fixture');
     await pdfFitsPages(page, path.join(dir, 'page.pdf'));
     steps.push('dedup-order-mirror-boundary');
+
+    const storeDialog = await openPrint(page, prof.touch);
+    await storeDialog.getByRole('checkbox', { name: 'Whole floor (every wall, full length)' }).uncheck();
+    await storeDialog.getByRole('checkbox', { name: 'Store' }).check();
+    await goPrint(page, prof.touch);
+    const storeHeads = await page.locator('#print-pack .page h2').allInnerTexts();
+    if (!storeHeads.includes('Store · North wall (W2)')) fail(`zone edge title ${JSON.stringify(storeHeads)}`);
+    const northEdge = await (await sheetText(page, 'W2', 'S')).innerText();
+    if (!northEdge.includes('No fittings on this wall.')) fail(`north edge sheet ${JSON.stringify(northEdge)}`);
+    steps.push('zone-edge-title');
 
     await press(page.locator('#btn-layers'), prof.touch);
     const lighting = page.locator('[data-testid="layer-lighting"]');
@@ -310,7 +369,7 @@ async function runProfile(browserHandle, prof) {
     const shownRadio = page.locator('[data-testid="print-scope-shown"]');
     if (await shownRadio.isDisabled()) fail('shown-layers choice stayed disabled');
     await press(shownRadio, prof.touch);
-    if (!/\b6 sheets\b/.test(await shownDialog.innerText())) fail('shown layers changed the sheet count');
+    if (!/\b8 sheets\b/.test(await shownDialog.innerText())) fail('shown layers changed the sheet count');
     await goPrint(page, prof.touch);
     const shownPack = await page.locator('#print-pack').innerText();
     if (!shownPack.includes('Not drawn: Lighting')) fail('shown-layers note missing');
@@ -349,6 +408,33 @@ async function runProfile(browserHandle, prof) {
     if (await (await sheetText(page, 'A', 'S')).locator('[data-testid="print-elevation-fitting"]').count() !== 1) fail('browser menu dropped the hidden switch');
     if ((await screenState(page)).layers !== filtered.layers) fail('browser menu changed layer visibility');
     steps.push('browser-menu');
+
+    await page.evaluate(() => {
+      window.__SURFACE_TEST__ = Object.assign(window.__SURFACE_TEST__ || {}, {
+        printIncludeInk: false,
+        throwDuringPrint: true,
+      });
+    });
+    const thrownAt = pageErrors.length;
+    await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
+    const thrown = pageErrors.findIndex((msg, index) => index >= thrownAt && String(msg).includes('print draw failed'));
+    if (thrown < 0) fail(`annotation swap did not throw inside the print path ${pageErrors.join(' | ')}`);
+    pageErrors.splice(thrown, 1);
+    await page.evaluate(() => {
+      delete window.__SURFACE_TEST__.printIncludeInk;
+      delete window.__SURFACE_TEST__.throwDuringPrint;
+    });
+    await press(page.getByRole('button', { name: 'Menu', exact: true }), prof.touch);
+    const inkItem = page.locator('#modal-root').getByRole('button', { name: 'Download backup (JSON)', exact: true });
+    const [inkDownload] = await Promise.all([
+      page.waitForEvent('download'),
+      press(inkItem, prof.touch),
+    ]);
+    const inkJob = JSON.parse(fs.readFileSync(await inkDownload.path(), 'utf8'));
+    if (JSON.stringify(inkJob.annotations && inkJob.annotations.PLAN) !== JSON.stringify([{ points: [[100, 200], [800, 900]] }])) {
+      fail(`print throw dropped plan ink ${JSON.stringify(inkJob.annotations && inkJob.annotations.PLAN)}`);
+    }
+    steps.push('print-ink-restored');
 
     await press(page.getByRole('button', { name: 'Menu', exact: true }), prof.touch);
     const csvItem = page.locator('#modal-root').getByRole('button', { name: 'Download CSV', exact: true });

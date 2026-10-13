@@ -4,6 +4,8 @@
 import { zonesOf, zoneTouchingFaces, wholeFloorFaces } from './floor-zones.js';
 import { wallLength } from './floor-walls.js';
 
+export const BUILD = 'surface-proto-v17-floor-final-20261013';
+
 const EXTERIOR_NAME = {
   A: 'North wall (A)',
   B: 'East wall (B)',
@@ -31,6 +33,8 @@ function faceLength(job, face) {
 
 export function faceTitleName(face) {
   if (EXTERIOR_NAME[face.wall]) return EXTERIOR_NAME[face.wall];
+  // A face on a zone edge uses the edge name: "North wall (W6)".
+  if (face.edge && face.label) return face.label;
   return face.sideLabel || face.label || String(face.wall);
 }
 
@@ -55,6 +59,17 @@ function compareSheets(a, b) {
 }
 
 // Endpoints of a zone clip that fall strictly inside the printed range.
+function boundarySides(ranges, names, atMm) {
+  const left = [];
+  const right = [];
+  ranges.forEach((range, i) => {
+    const name = names[i];
+    if (range[1] === atMm && !left.includes(name)) left.push(name);
+    if (range[0] === atMm && !right.includes(name)) right.push(name);
+  });
+  return { left, right };
+}
+
 function boundariesFor(ranges, names, from, to) {
   const at = new Map();
   ranges.forEach((range, i) => {
@@ -67,7 +82,10 @@ function boundariesFor(ranges, names, from, to) {
   });
   return [...at.entries()]
     .sort((a, b) => a[0] - b[0])
-    .map(([atMm, zoneNames]) => ({ atMm, names: zoneNames }));
+    .map(([atMm, zoneNames]) => {
+      const sides = boundarySides(ranges, names, atMm);
+      return { atMm, names: zoneNames, left: sides.left, right: sides.right };
+    });
 }
 
 function finishSheet(job, face, fromMm, toMm, zoneNames, ranges, boundaryNames) {
@@ -79,6 +97,7 @@ function finishSheet(job, face, fromMm, toMm, zoneNames, ranges, boundaryNames) 
     interior: !!face.interior,
     sideLabel: face.sideLabel || '',
     label: face.label || '',
+    edge: face.edge || null,
     fromMm,
     toMm,
     lengthMm,

@@ -12,6 +12,14 @@ function roomJob() {
 
 const snap = (job) => JSON.stringify(job);
 
+test('an exterior wall refuses its outer face', () => {
+  const job = roomJob();
+  const before = snap(job);
+  assert.throws(() => C.faceOffsetToPlan(job, 'A', 'N', 1000), /That face is not on this wall/);
+  assert.deepEqual(C.faceOffsetToPlan(job, 'A', 'S', 1000), { x: 1000, y: 0 });
+  assert.equal(snap(job), before);
+});
+
 test('vertical E and W offsets mirror onto one plan point', () => {
   const job = roomJob();
   assert.equal(C.addWall(job, { x1: 4000, y1: 1000, x2: 4000, y2: 5000 }), 'W1');

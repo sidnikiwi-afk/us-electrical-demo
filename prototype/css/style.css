@@ -295,7 +295,7 @@ button.q-chip { border: 0; font: inherit; color: inherit; cursor: pointer; }
   .start-card { margin: auto; padding: 16px; gap: 8px; }
   .start-card h1 { font-size: 19px; }
 
-  #toast { top: 46px; bottom: auto; left: 8px; right: 8px; transform: none; max-width: none; pointer-events: none; }
+  #toast { top: calc(var(--topbar-h, 96px) + 8px); bottom: auto; left: 8px; right: 8px; transform: none; max-width: none; pointer-events: none; }
   #view-tabs { flex: 0 0 auto; }
   #canvas-wrap { flex: 1 1 auto; }
 }
@@ -319,7 +319,7 @@ button.q-chip { border: 0; font: inherit; color: inherit; cursor: pointer; }
   #inspector { grid-area: auto; position: absolute; left: auto; right: 8px; bottom: 8px; z-index: 20; max-width: min(360px, 60%); max-height: none; padding: 0 10px; border: 1px solid #23324d; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,.3); }
   body.inspector-collapsed #place-palette:not([hidden]) ~ #inspector { bottom: 60px; }
   body:not(.inspector-collapsed) #inspector { top: 50px; right: 0; bottom: 0; width: min(380px, 55%); max-width: none; overflow-y: auto; padding: 0 12px 12px; border-width: 0 0 0 2px; border-radius: 0; }
-  #toast { bottom: 60px; }
+  #toast { bottom: 60px; top: auto; }
 }
 
 /* Phone landscape (Opus-approved): same short-landscape arrangement as the
@@ -455,7 +455,8 @@ button.q-chip { border: 0; font: inherit; color: inherit; cursor: pointer; }
    two-line slot so the drawing does not jump when the note text changes. */
 .zone-select { min-height: 44px; min-width: 0; max-width: 16rem; font: inherit; }
 .face-row { display: contents; }
-.zone-notes { font-size: 13px; line-height: 1.3; min-height: 2.6em; max-height: 6.5em; min-width: 0; max-width: 100%; overflow: hidden; color: #23324d; }
+.zone-notes { font-size: 13px; line-height: 1.3; min-height: 0; max-height: 6.5em; min-width: 0; max-width: 100%; overflow: hidden; color: #23324d; }
+.zone-notes:not(:empty) { min-height: 2.6em; }
 .zone-notes p { margin: 0; }
 .zone-notes[hidden] { display: none; }
 .zone-notes button { min-height: 44px; margin-top: 2px; }
@@ -477,3 +478,31 @@ button.q-chip { border: 0; font: inherit; color: inherit; cursor: pointer; }
   #canvas-wrap #layers-panel { max-height: calc(100cqh - 64px); }
   #canvas-wrap:has(#btn-layers-reset:not([hidden])) #layers-panel { max-height: calc(100cqh - 116px); }
 }
+
+/* Print choices stay one row on every screen. The row is the hit target.
+   The control itself stays a normal radio or checkbox. A disabled choice is grey. */
+.modal label.print-choice {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  margin: 4px 0;
+  font-weight: 400;
+  cursor: pointer;
+}
+.modal label.print-choice span { flex: 1; min-width: 0; font-weight: 400; }
+.modal label.print-choice input,
+.modal .print-sheets .print-choice input {
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  min-height: 22px;
+  max-height: 22px;
+  flex: 0 0 22px;
+  margin: 0;
+  padding: 0;
+}
+.modal label.print-choice:has(input:disabled) { color: #8a93a3; }
+.modal label.print-choice input:disabled { opacity: 0.45; }
+#print-pack [data-testid="print-legend"] { font-size: 9.5pt; line-height: 1.3; }

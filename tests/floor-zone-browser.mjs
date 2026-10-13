@@ -257,6 +257,28 @@ async function shot(page, dir, name) {
   await page.screenshot({ path: path.join(dir, name) });
 }
 
+async function svgClient(page, x, y) {
+  return page.evaluate(({ x, y }) => {
+    const svg = document.querySelector('#canvas');
+    const world = svg.querySelector('#world');
+    const pt = svg.createSVGPoint();
+    pt.x = x;
+    pt.y = y;
+    const s = pt.matrixTransform(world.getScreenCTM());
+    return { x: s.x, y: s.y };
+  }, { x, y });
+}
+
+async function planClick(page, x, y) {
+  const p = await svgClient(page, x, y);
+  await page.mouse.click(p.x, p.y);
+}
+
+async function openDetails(page, touch) {
+  const show = page.getByRole('button', { name: 'Show details', exact: true });
+  if (await show.count() && await show.first().isVisible()) await press(show.first(), touch);
+}
+
 async function createJob(page, touch) {
   await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => document.documentElement.dataset.jobsBoot === 'ready');
@@ -374,6 +396,45 @@ async function runProfile(browserHandle, prof) {
     assertBackup(removed, false);
     await assertNoOverflow(page, 'redo');
     await shot(page, dir, '06-redo.png');
+
+    // The new zone is selected even when a fitting inside it was selected first.
+    // A later scope change keeps that fitting when it is still visible.
+    await press(page.locator('#mode-rail [data-mode="place"]'), prof.touch);
+    await press(await onlyVisible(page, 'pal-surface'), prof.touch);
+    // a surface socket on wall A inside Bay; at 3.5 m it is clear of the floating Layers and zoom
+    // buttons, which sit over the top wall on phone while details are open
+    await planClick(page, 3500, 80);
+    await page.locator('#canvas .fitting[data-id="F1"]').waitFor({ state: 'attached' });
+    await openDetails(page, prof.touch);
+    const fittingHead = (await page.locator('#inspector h2').first().innerText()).trim();
+    if (!fittingHead.includes('F1')) fail(`socket was not selected: ${JSON.stringify(fittingHead)}`);
+    if (await page.locator('#inspector [data-testid="ins-type"]').count() !== 1) fail('fitting inspector did not open');
+    await press(await onlyVisible(page, 'mode-build'), prof.touch);
+    await press(await onlyVisible(page, 'build-add-zone'), prof.touch);
+    await press(await onlyVisible(page, 'build-enter-sizes'), prof.touch);
+    await fillZone(page, prof.touch, { name: 'Bay', x0: 0, y0: 0, width: 4000, depth: 4000 });
+    await page.waitForFunction(() => !document.querySelector('#modal-root .modal'));
+    await waitSelected(page, 'Bay');
+    await ensureZoneFields(page, prof.touch);
+    if (await (await onlyVisible(page, 'zone-name')).inputValue() !== 'Bay') fail('new zone was not selected');
+    if (await page.locator('#inspector [data-testid="ins-type"]').count()) fail('fitting stayed selected after the zone was created');
+    await chooseZone(page, 'Whole floor');
+    await press(page.locator('#mode-rail [data-mode="select"]'), prof.touch);
+    await planClick(page, 3500, 260);
+    await openDetails(page, prof.touch);
+    const wholeHead = (await page.locator('#inspector h2').first().innerText()).trim();
+    if (!wholeHead.includes('F1')) fail(`whole floor did not keep the fitting: ${JSON.stringify(wholeHead)}`);
+    await chooseZone(page, 'Bay');
+    await openDetails(page, prof.touch);
+    const scopedHead = (await page.locator('#inspector h2').first().innerText()).trim();
+    if (!scopedHead.includes('F1')) fail(`zone scope cleared a visible fitting: ${JSON.stringify(scopedHead)}`);
+    if (await page.locator('#inspector [data-testid="zone-name"]').count()) fail('zone panel replaced a visible fitting');
+    await chooseZone(page, 'Whole floor');
+    await openDetails(page, prof.touch);
+    const backHead = (await page.locator('#inspector h2').first().innerText()).trim();
+    if (!backHead.includes('F1')) fail(`leaving the zone cleared a visible fitting: ${JSON.stringify(backHead)}`);
+    await shot(page, dir, '07-zone-selected.png');
+
     if (consoleErrors.length) fail(`console errors: ${consoleErrors.join(' | ')}`);
     if (external.length) fail(`external requests: ${external.join(' | ')}`);
     record.pass = true;

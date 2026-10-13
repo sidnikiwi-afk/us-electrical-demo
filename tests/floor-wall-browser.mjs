@@ -171,6 +171,43 @@ async function waitToast(page, needle) {
   }, needle);
 }
 
+async function assertFaceTextClear(page, label) {
+  const problem = await page.evaluate(() => {
+    const texts = [];
+    const take = (el) => {
+      const r = el.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) return null;
+      return { kind: el.getAttribute('data-testid'), x: r.left, y: r.top, r: r.right, b: r.bottom };
+    };
+    document.querySelectorAll('[data-testid="wall-caption"], [data-testid="wall-ruler"], [data-testid="wall-continues"]').forEach((el) => {
+      const box = take(el);
+      if (box) texts.push(box);
+    });
+    if (!texts.some((box) => box.kind === 'wall-caption')) return 'caption missing';
+    if (!texts.some((box) => box.kind === 'wall-ruler')) return 'dimension labels missing';
+    const controls = [];
+    for (const sel of ['#layers-control', '#zoom-controls']) {
+      const el = document.querySelector(sel);
+      if (!el) return `${sel} missing`;
+      const box = take(el);
+      if (!box) return `${sel} not shown`;
+      box.kind = sel;
+      controls.push(box);
+    }
+    const hit = (a, b) => a.x < b.r && b.x < a.r && a.y < b.b && b.y < a.b;
+    for (let i = 0; i < texts.length; i += 1) {
+      for (let j = i + 1; j < texts.length; j += 1) {
+        if (hit(texts[i], texts[j])) return `${texts[i].kind} overlaps ${texts[j].kind}`;
+      }
+      for (const control of controls) {
+        if (hit(texts[i], control)) return `${texts[i].kind} overlaps ${control.kind}`;
+      }
+    }
+    return null;
+  });
+  if (problem) fail(`${label}: ${problem}`);
+}
+
 async function tabIds(page) {
   return page.locator('#view-tabs button').evaluateAll((els) => els.map((el) => el.getAttribute('data-testid')));
 }
@@ -427,11 +464,13 @@ async function runProfile(browserHandle, prof) {
     if (!clipCaption || !clipCaption.includes('Cutting floor') || !clipCaption.includes('W1 west side') || !clipCaption.includes('0.00 to 5.50 m of 5.50 m')) {
       fail(`clip caption ${JSON.stringify(clipCaption)}`);
     }
+    await assertFaceTextClear(page, 'W1 clip');
     const drawn = await page.locator('#canvas .fitting').evaluateAll((els) => els.map((el) => el.getAttribute('data-id')));
     if (drawn.join(',') !== 'F1') fail(`west face drew ${drawn.join(',')}`);
     await press(page.locator('[data-testid="tab-A"]'), prof.touch);
     const wallA = await page.locator('[data-testid="wall-caption"]').textContent();
     if (!wallA || !wallA.includes('Cutting floor · Wall A · 2.50 to 6.00 m of 9.00 m')) fail(`Wall A caption ${JSON.stringify(wallA)}`);
+    await assertFaceTextClear(page, 'Wall A clip');
     await press(page.locator('[data-testid="tab-PLAN"]'), prof.touch);
     steps.push('zone-clip');
     await shot(page, dir, '05-zone-clip.png');

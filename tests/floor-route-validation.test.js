@@ -28,7 +28,8 @@ test('refused runs leave the job and the route counter unchanged', () => {
   assert.throws(() => C.addRoute(job, { type: 'trunking', wall, face: 'N', startMm: 1.5, endMm: 100, heightMm: 0, notes: '' }), /whole millimetres/);
   assert.throws(() => C.addRoute(job, { type: 'trunking', wall, face: 'N', startMm: -1, endMm: 100, heightMm: 0, notes: '' }), /3\.50 m long/);
   assert.throws(() => C.addRoute(job, { type: 'trunking', wall, face: 'N', startMm: 0, endMm: 3501, heightMm: 0, notes: '' }), /3\.50 m long/);
-  assert.throws(() => C.addRoute(job, { type: 'trunking', wall, face: 'N', startMm: 200, endMm: 200, heightMm: 0, notes: '' }), /3\.50 m long/);
+  assert.throws(() => C.addRoute(job, { type: 'trunking', wall, face: 'N', startMm: 200, endMm: 200, heightMm: 0, notes: '' }), /A run must be at least 50 mm long\./);
+  assert.throws(() => C.addRoute(job, { type: 'trunking', wall, face: 'N', startMm: 300, endMm: 100, heightMm: 0, notes: '' }), /3\.50 m long/);
   assert.throws(() => C.addRoute(job, { type: 'trunking', wall, face: 'N', startMm: 0, endMm: 49, heightMm: 0, notes: '' }), /at least 50 mm/);
   assert.throws(() => C.addRoute(job, { type: 'trunking', wall, face: 'N', startMm: 0, endMm: 50, heightMm: -1, notes: '' }), /Height must be 0 to 2700 mm/);
   assert.throws(() => C.addRoute(job, { type: 'trunking', wall, face: 'N', startMm: 0, endMm: 50, heightMm: 2701, notes: '' }), /Height must be 0 to 2700 mm/);
@@ -151,6 +152,10 @@ test('exterior faces A to D accept only the inside face', () => {
   assert.deepEqual(C.faceOffsetToPlan(job, 'C', 'N', 1000), { x: 8000, y: 6000 });
   assert.deepEqual(C.faceOffsetToPlan(job, 'B', 'W', 1000), { x: 9000, y: 1000 });
   assert.deepEqual(C.faceOffsetToPlan(job, 'D', 'E', 1000), { x: 0, y: 5000 });
+  assert.throws(() => C.faceOffsetToPlan(job, 'A', 'N', 1000), /That face is not on this wall/);
+  assert.throws(() => C.faceOffsetToPlan(job, 'B', 'E', 1000), /That face is not on this wall/);
+  assert.throws(() => C.faceOffsetToPlan(job, 'C', 'S', 1000), /That face is not on this wall/);
+  assert.throws(() => C.faceOffsetToPlan(job, 'D', 'W', 1000), /That face is not on this wall/);
   assert.equal(C.validateJobV2(job).ok, true);
 });
 
