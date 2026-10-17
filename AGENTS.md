@@ -7,7 +7,10 @@ at baseline commit `dc71cdd75ab5e9c680830f0829ddd2f00154a5c6`. On Saeed's machin
 read `skills/<name>/SKILL.md` from that commit in `~/Projects/agent-skills`;
 use working files only when they match it. A replacement revision needs a
 `/retro` PR and Saeed's yes; record its exact SHA in the task/PR before use.
-If a definition is unavailable, report the blocker instead of claiming usage.
+For this bootstrap, Saeed's approval and merge of agent-skills #18 and #19
+adopts their combined merge SHA as the replacement baseline; record that SHA
+before loading the updated skills. No second retro PR is needed for that
+already-approved adoption. If a definition is unavailable, report the blocker.
 
 Use Matt Pocock's skills as the base. Start with `/grill-with-docs` or an
 approved spec, implement with `/implement` or `/implement-spec`, diagnose bugs
@@ -16,7 +19,7 @@ and package with `/pr`. Run `/retro` after merge. Use pstack and Addy Osmani
 skills only to fill gaps such as launch, performance, or security.
 
 Every PR must include a `Skills used` line linking evidence for each applicable
-stage. Explain any stage marked N/A; record `/retro` as pending until merge.
+stage. Explain any stage marked N/A; record `/retro` as pending until merge with a named controller as owner.
 Reviewers and `babysit-pr` must flag missing stages or evidence and keep the PR
 unclean until corrected. A pending post-merge retro is not a pre-merge failure.
 
