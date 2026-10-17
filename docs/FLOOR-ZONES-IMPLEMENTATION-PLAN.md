@@ -29,7 +29,7 @@ Existing jobs are read as a floor with their four exterior walls and retained fi
 
 ## Workers and sequence
 
-Use IMPLEMENTATION-MODEL-PLAN.md. Controller, implementer, UI guidance and reviewer routing follow `docs/IMPLEMENTATION-MODEL-PLAN.md` (Model routing section), which replaces the role table that was here. PR review: Sol; Grok 4.7 medium fallback satisfies the review gate when Sol is unavailable (record which ran).
+Use IMPLEMENTATION-MODEL-PLAN.md. Controller, implementer, UI guidance and reviewer routing follow `docs/IMPLEMENTATION-MODEL-PLAN.md` (Model routing section), which replaces the role table that was here. PR review: Sol, or Grok 4.7 medium when Sol is unavailable (record which ran). The release gate is stricter: `docs/ZONES-RELEASE.md` still requires exact-head subscription Codex review before release.
 
 Before every worker launch: resolve exact model/harness/auth, verify Office unprivileged agent admission, resource and allowance gates, and attach a visibly named Herdr worker in the electrician workspace. No silent model/host substitution or paid API fallback. Workers receive sanitised source pointers and explicit isolated write scopes; controller owns integration and tracking.
 
@@ -40,7 +40,7 @@ Create a spec and dependency-linked local tickets, preserving the preview as des
 4. Floor/wall/zone editing and fitting integration.
 5. Containment editing and print sheets.
 6. Regression, upgrade/offline, visual and independent review; fix findings.
-7. PR packaging and exact-head review: Sol, or Grok 4.7 medium when Sol is unavailable (record which ran).
+7. PR packaging and exact-head subscription Codex (Sol) review, as `docs/ZONES-RELEASE.md` requires for release (the Grok 4.7 medium fallback covers ordinary PR review only).
 
 Serialize shared app edits; parallelise only admitted, genuinely independent evidence/review tasks. Use fresh compact packets and harvest durable results before closing temporary workers. Start with a small end-to-end saved floor/zone slice before widening the build.
 
@@ -54,7 +54,7 @@ Make repo checks runnable with documented paths and add a scoped CI workflow if 
 
 Use a feature/integration branch and draft PR. Stage only named app, test, workflow and documentation files; exclude .private, raw messages, credentials and unrelated archives. Regenerate public guides/download bundles from the reviewed source when affected. PR includes before/after evidence, limitations and rollback impact using the pr skill template.
 
-Require green applicable CI, independent findings resolved, Opus design-match evidence and durable exact-head review: Sol, or Grok 4.7 medium when Sol is unavailable (record which ran). Recheck the head before acceptance. Publication of this feature is not authorised by this proposed build plan. Agents open and update PRs. No agent merges, deploys, enables auto-merge, uses admin bypass or pushes to the default branch. Only Saeed merges, or he says "merge N" directly to the agent for one PR. "merge N" covers that one merge; a deploy, including a merge that publishes to Pages, needs Saeed to name it. No first-time auto-deploy enablement is included.
+Require green applicable CI, independent findings resolved, Opus design-match evidence and durable exact-head subscription Codex (Sol) review, as `docs/ZONES-RELEASE.md` requires for release (the Grok 4.7 medium fallback covers ordinary PR review only). Recheck the head before acceptance. Publication of this feature is not authorised by this proposed build plan. Agents open and update PRs. No agent merges, deploys, enables auto-merge, uses admin bypass or pushes to the default branch. Only Saeed merges, or he says "merge N" directly to the agent for one PR. "merge N" covers that one merge; a deploy, including a merge that publishes to Pages, needs Saeed to name it. No first-time auto-deploy enablement is included.
 
 After authorised release, verify deployment identity matches the merge SHA, public asset/build identity, real app journeys, offline cache update and save/reopen/export using synthetic jobs. Preserve browser records during rollback. A green PR or worker result is not production verification.
 
