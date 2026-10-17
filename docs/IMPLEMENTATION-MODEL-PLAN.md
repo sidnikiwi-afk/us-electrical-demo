@@ -7,10 +7,11 @@ Recorded 12 October 2026 from Saeed's model-selection discussion. Saeed approved
 Approved by Saeed, 2026-10-17. The full roster is the canonical Model Roster v1.4 in the Universal Prompt Library; if this section and the roster disagree, the roster wins.
 
 - Orchestrator: Opus 5.5 (`claude-opus-5-5`).
-- Heavy building, coding and reviewing: Grok 4.7 (`grok -m grok-4.7`).
-- Bigger context window: Grok 4.6 medium (`grok -m grok-4.6 --effort medium`). Pending Saeed's confirmation: locally Grok 4.6 and 4.7 both report a 256k-token window.
-- Fast or quick tasks: GLM 5.3 Flash (`glm53flash --permission-mode auto --effort low`).
-- PR reviews: GPT 6.1 Sol (`codex -m gpt-6.1-sol`); fallback Grok 4.7 medium (`grok -m grok-4.7 --effort medium`).
+- Heavy building, coding and reviewing: Grok 4.7 (`grok -m grok-4.7 --effort medium`; high for named hard tasks).
+- Long reads: Grok 4.6 medium (`grok -m grok-4.6 --effort medium`), a cheaper, faster lane with the same 256k window as Grok 4.7.
+- Fast or quick tasks: GLM 5.3 Flash (`glm53flash --permission-mode auto --effort low`); when it is down, Cursor Composer (`cursor-agent --model composer-2.5`).
+- PR reviews: GPT 6.1 Sol (`codex -m gpt-6.1-sol`, medium; ultra for security, tenancy, migration or billing PRs); fallback Grok 4.7 medium (`grok -m grok-4.7 --effort medium`).
+- Start a fresh session at about 50% of the context window or after 2 compactions.
 
 Real work runs in Herdr tabs; Grok Bot only routes, relays and reports. Product model pins (Retell voices, app LLM calls, Workers AI bindings) are separate and stay as they are.
 
