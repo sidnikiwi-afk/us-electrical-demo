@@ -14,6 +14,8 @@ Approved by Saeed, 2026-10-17. The full roster is the canonical Model Roster v1.
 
 Real work runs in Herdr tabs; Grok Bot only routes, relays and reports. Product model pins (Retell voices, app LLM calls, Workers AI bindings) are separate and stay as they are.
 
+Project release gates are stricter and stay: `docs/ZONES-RELEASE.md` keeps its own required reviews (Opus 5.5 design review, GLM 5.3 Standards/Spec review, subscription Codex review).
+
 Saeed approved an earlier table on 2026-10-12. The 2026-10-17 policy replaces it. Resolve runtime identifiers, helper paths and authentication at admission before any dispatch. Office agent is first-choice worker host; controller stays here. No paid API route is authorised.
 
 Suggested sequence: approved spec/tickets -> bounded UI guidance -> Grok implementation slices -> controller-run verification -> visual review plus independent Standards/Spec review -> Grok corrections -> exact-head PR review (`codex -m gpt-6.1-sol`) -> existing CI/merge/deployment/smoke gates. Consult only when evidence exposes a named hard question. Model selection does not authorize implementation or publication.
