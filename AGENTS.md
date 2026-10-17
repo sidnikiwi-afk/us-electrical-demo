@@ -7,7 +7,7 @@ at baseline commit `dc71cdd75ab5e9c680830f0829ddd2f00154a5c6`. On Saeed's machin
 read `skills/<name>/SKILL.md` from that commit in `~/Projects/agent-skills`;
 use working files only when they match it. A replacement revision needs a
 `/retro` PR and Saeed's yes; record its exact SHA in the task/PR before use.
-For this bootstrap, Saeed's approval and merge of agent-skills #18 and #19
+For this bootstrap, Saeed's approval and merge of agent-skills #16, #18 and #19
 adopts their combined merge SHA as the replacement baseline; record that SHA
 before loading the updated skills. No second retro PR is needed for that
 already-approved adoption. If a definition is unavailable, report the blocker.
